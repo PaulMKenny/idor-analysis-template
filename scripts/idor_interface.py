@@ -191,25 +191,20 @@ def browse_tree_and_save():
 # ==========================================================
 
 def run_analyzers_from_session():
-    if NAV_MODE != "session":
-        return
+     session_dir = get_active_session_dir()
+     input_dir = session_dir / "input"
+     output_dir = session_dir / "output"
+     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("\n=== Run IDOR Analyzer (Session Mode) ===\n")
+     history = select_from_saved_box("history")
+     sitemap = select_from_saved_box("sitemap")
 
-    history = select_from_saved_box("Select history XML #: ")
-    sitemap = select_from_saved_box("Select sitemap XML #: ")
+     subprocess.run(
+         ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
+         cwd=output_dir,
+         check=True,
+     )
 
-    if not history or not sitemap:
-        return
-
-    session_root = history.parents[2]
-    output_dir = session_root / "output"
-
-    subprocess.run(
-        ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
-        cwd=output_dir,
-        check=True,
-    )
 
     sitemap_tree_file = output_dir / "sitemap_tree.txt"
     with open(sitemap_tree_file, "w", encoding="utf-8") as f:
