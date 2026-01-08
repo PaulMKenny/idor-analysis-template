@@ -436,12 +436,10 @@ def main():
     if analyzer.graphql_operations:
         print_graphql_summary(analyzer)
 
-    if view_mode in ("id", "both"):
-        print_idor_candidates(analyzer)
-    if view_mode in ("endpoint", "both"):
-        print_endpoint_grouped(analyzer)
-    if view_mode in ("cooccurrence", "both"):
-        print_cooccurrence(analyzer)
+    print_idor_candidates(analyzer)
+    print_endpoint_grouped(analyzer)
+    print_cooccurrence(analyzer)
+
 
     out_csv = f"{Path(history_xml).stem}_idor_candidates.csv"
     export_csv(analyzer, out_csv)
