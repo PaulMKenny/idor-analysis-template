@@ -1,0 +1,13 @@
+# Real data
+*.xml
+*.har
+
+# Outputs
+idor_candidates.csv
+idor_relevant_transactions.txt
+
+# Secrets
+.env
+
+# Allow placeholder example
+!examples/placeholder_history.xml
