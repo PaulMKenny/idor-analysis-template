@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""
-IDOR ANALYZER — SINGLE SESSION
-GraphQL + REST + ORIGIN TRACKING (ANALYSIS ONLY)
+# ==================================================
+# IDOR ANALYZER — SINGLE SESSION
+# GraphQL + REST + ORIGIN TRACKING (ANALYSIS ONLY)
+# ==================================================
 
-CLI usage:
-    python3 idor_analyzer.py <history.xml> <sitemap.xml>
+# @title IDOR Analyzer (Paste XML filename below and click Run)
 
-Outputs (written to current working directory):
-    - idor_candidates.csv
-    - idor_relevant_transactions.txt
-"""
+xml_file = "session.xml"   # @param {type:"string"}
+view_mode = "both"         # @param ["id", "endpoint", "cooccurrence", "both"]
+full_report = True         # @param {type:"boolean"}
+summarize_existing_csv = ""  # @param {type:"string"}
 
-import sys
+# ========== SCRIPT START ==========
+
 import csv
 import base64
 import json
@@ -25,6 +26,7 @@ from pathlib import Path
 # ============================================================
 
 class Config:
+    # KEEP DISCIPLINED — no token/key/node expansion
     KEY_REGEX = re.compile(
         r'(?:^|[^a-zA-Z])(id|.*_id|id_.*|uuid|guid|iid)(?:$|[^a-zA-Z])',
         re.IGNORECASE
@@ -41,15 +43,23 @@ class Config:
         re.DOTALL | re.IGNORECASE
     )
 
+    # GraphQL global ID patterns (visibility only)
     GRAPHQL_ID_PATTERNS = [
         re.compile(r'^gid://([^/]+)/([^/]+)/(\d+)$'),
         re.compile(r'^urn:([^:]+):([^:]+):(\d+)$'),
     ]
 
+    # OWNERSHIP-GRADE KEYS ONLY
     SEMANTIC_ID_KEYS = {
-        "user_id", "account_id", "org_id", "organisation_id",
-        "agent_id", "ticket_id", "order_id",
-        "id", "iid"
+        "user_id",
+        "account_id",
+        "org_id",
+        "organisation_id",
+        "agent_id",
+        "ticket_id",
+        "order_id",
+        "id",
+        "iid",
     }
 
     BLACKLIST_VALUES = {
@@ -213,20 +223,29 @@ def is_graphql_request(obj):
 # ============================================================
 
 class IDORAnalyzer:
-    def __init__(self, history_xml):
-        self.history_xml = history_xml
+    def __init__(self, xml_path):
+        self.xml_path = xml_path
+
         self.id_index = defaultdict(lambda: defaultdict(lambda: defaultdict(set)))
         self.id_timeline = defaultdict(list)
         self.id_origin = {}
+
         self.id_cooccurrence = defaultdict(set)
         self.status_by_msg = {}
+
+        # GraphQL visibility (context only)
         self.graphql_operations = defaultdict(list)
-        self.id_to_operations = defaultdict(set)
         self.msg_to_operation = {}
+        self.id_to_operations = defaultdict(set)
+
+        # Filtered client-supplied IDs
+        self.client_supplied_ids = set()
+
+        # Raw transactions
         self.raw_messages = {}
 
     def analyze(self):
-        for msg_id, raw_req, raw_resp in iter_http_messages(self.history_xml):
+        for msg_id, raw_req, raw_resp in iter_http_messages(self.xml_path):
             self.raw_messages[msg_id] = {
                 "request": raw_req.decode(errors="replace"),
                 "response": raw_resp.decode(errors="replace"),
@@ -262,6 +281,8 @@ class IDORAnalyzer:
 
                 for k, v in walk_json_ids(obj.get("variables", {})):
                     self._mark_client(v)
+                    if is_likely_id_value(v):
+                        self.client_supplied_ids.add(v)
                     self._record(v, k, "request", msg_id, method, path)
 
                 payload = {k: v for k, v in obj.items() if k != "variables"}
@@ -275,18 +296,6 @@ class IDORAnalyzer:
         response_ids = []
 
         for obj in extract_json_objects(resp_body):
-            for k, v, parent in walk_json_with_context(obj):
-                self._mark_server(v)
-                self._record(v, k, "response", msg_id, method, path)
-                response_ids.append((k, v))
-
-                if parent and parent != v:
-                    self.id_cooccurrence[f"structural:{parent}"].add(f"{k}:{v}")
-
-                if msg_id in self.msg_to_operation:
-                    self.id_to_operations[v].add(self.msg_to_operation[msg_id])
-
-        for obj in extract_embedded_json(raw_resp.decode(errors="replace")):
             for k, v, parent in walk_json_with_context(obj):
                 self._mark_server(v)
                 self._record(v, k, "response", msg_id, method, path)
@@ -350,6 +359,58 @@ class IDORAnalyzer:
 # OUTPUT
 # ============================================================
 
+def print_graphql_summary(analyzer):
+    print("\n" + "=" * 60)
+    print("GRAPHQL ANALYSIS")
+    print("=" * 60)
+
+    for op, msgs in sorted(analyzer.graphql_operations.items()):
+        print(f"{op}: {len(msgs)} calls")
+
+    if analyzer.client_supplied_ids:
+        print("\nClient-supplied ID candidates:")
+        for v in sorted(analyzer.client_supplied_ids):
+            print(f"  - {v}")
+
+def print_idor_candidates(analyzer):
+    print("\n" + "=" * 60)
+    print("HIGH-SIGNAL IDOR CANDIDATES")
+    print("=" * 60)
+
+    hits = analyzer.get_semantic_hits()
+    for v in sorted(hits):
+        print(f"\n{v} [{analyzer.id_origin.get(v)}]")
+        ops = analyzer.id_to_operations.get(v)
+        if ops:
+            print(f"  operations: {', '.join(sorted(ops))}")
+        for k in hits[v]:
+            print(f"  {k}")
+            for ep in hits[v][k]:
+                print(f"    {ep}")
+
+def print_endpoint_grouped(analyzer):
+    print("\n" + "=" * 60)
+    print("IDOR CANDIDATES (BY ENDPOINT)")
+    print("=" * 60)
+
+    grouped = defaultdict(set)
+    for v, keys in analyzer.get_semantic_hits().items():
+        for k, eps in keys.items():
+            for ep in eps:
+                grouped[ep].add(v)
+
+    for ep in sorted(grouped):
+        print(f"\n{ep}")
+        for v in sorted(grouped[ep]):
+            print(f"  - {v}")
+
+def print_cooccurrence(analyzer):
+    print("\n" + "=" * 60)
+    print("ID CO-OCCURRENCE")
+    print("=" * 60)
+    for k in analyzer.id_cooccurrence:
+        print(f"{k} → {sorted(analyzer.id_cooccurrence[k])}")
+
 def export_csv(analyzer, out_path):
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -379,37 +440,34 @@ def export_relevant_transactions(analyzer, out_path):
             f.write("\n\n")
 
 # ============================================================
-# MAIN (CLI)
+# MAIN
 # ============================================================
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python3 idor_analyzer.py <history.xml> <sitemap.xml>")
-        sys.exit(1)
-
-    history_xml = Path(sys.argv[1]).resolve()
-    sitemap_xml = Path(sys.argv[2]).resolve()
-
-    if not history_xml.is_file():
-        print(f"ERROR: history XML not found: {history_xml}")
-        sys.exit(1)
-
-    if not sitemap_xml.is_file():
-        print(f"ERROR: sitemap XML not found: {sitemap_xml}")
-        sys.exit(1)
-
-    print(f"[*] Analyzing history: {history_xml}")
-    print(f"[*] Sitemap provided: {sitemap_xml}")
-
-    analyzer = IDORAnalyzer(history_xml)
+    xml_path = f"/content/{xml_file}"
+    analyzer = IDORAnalyzer(xml_path)
     analyzer.analyze()
 
-    export_csv(analyzer, "idor_candidates.csv")
-    export_relevant_transactions(analyzer, "idor_relevant_transactions.txt")
+    if analyzer.graphql_operations:
+        print_graphql_summary(analyzer)
 
-    print("[+] Exported:")
-    print("    - idor_candidates.csv")
-    print("    - idor_relevant_transactions.txt")
+    if view_mode in ("id", "both"):
+        print_idor_candidates(analyzer)
+    if view_mode in ("endpoint", "both"):
+        print_endpoint_grouped(analyzer)
+    if view_mode in ("cooccurrence", "both"):
+        print_cooccurrence(analyzer)
 
-if __name__ == "__main__":
+    out_csv = f"{Path(xml_file).stem}_idor_candidates.csv"
+    export_csv(analyzer, f"/content/{out_csv}")
+
+    tx_out = f"{Path(xml_file).stem}_idor_relevant_transactions.txt"
+    export_relevant_transactions(analyzer, f"/content/{tx_out}")
+
+    print(f"\n[+] Exported to {out_csv}")
+    print(f"[+] Exported to {tx_out}")
+
+if summarize_existing_csv:
+    print("CSV summarization not enabled in analysis-only build.")
+else:
     main()
