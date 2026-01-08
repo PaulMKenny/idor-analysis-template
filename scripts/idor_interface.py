@@ -75,15 +75,29 @@ def show_saved_box():
             print(f"[{i}] {item}")
     print()
 
-def select_from_saved_box(prompt: str) -> Path | None:
+def select_from_saved_box(prompt: str, suffix: str | None = None) -> Path | None:
     box = active_saved_box()
-    show_saved_box()
+
+    filtered = [
+        p for p in box
+        if p.is_file() and (suffix is None or p.name.endswith(suffix))
+    ]
+
+    print("\n=== SESSION SAVED BOX ===")
+    if not filtered:
+        print("(empty)")
+        return None
+
+    for i, item in enumerate(filtered, 1):
+        print(f"[{i}] {item}")
+
     try:
         idx = int(input(prompt)) - 1
-        return box[idx]
+        return filtered[idx]
     except Exception:
         print("ERROR: Invalid selection.\n")
         return None
+
 
 # ==========================================================
 # SESSION MANAGEMENT
@@ -179,6 +193,10 @@ def browse_tree_and_save():
             raise ValueError
 
         path = Path(absolute[idx])
+        if not path.is_file():
+            print("ERROR: Only files can be saved.\n")
+            return
+            
         save(path)
         print(f"\nSaved: {path}\n")
 
