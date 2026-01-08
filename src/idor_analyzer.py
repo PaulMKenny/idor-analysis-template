@@ -4,6 +4,16 @@
 # GraphQL + REST + ORIGIN TRACKING (ANALYSIS ONLY)
 # ==================================================
 
+"""
+CLI usage (REQUIRED by idor_interface.py):
+
+    python3 idor_analyzer.py <history.xml> [sitemap.xml]
+
+Notes:
+- sitemap.xml is accepted for interface compatibility
+- sitemap is NOT used in analysis (analysis-only build)
+"""
+
 import sys
 import csv
 import base64
@@ -18,7 +28,7 @@ from pathlib import Path
 # ============================================================
 
 class Config:
-    # KEEP DISCIPLINED — no token/key/node expansion
+    # DISCIPLINED: do NOT expand token/key/node/etc
     KEY_REGEX = re.compile(
         r'(?:^|[^a-zA-Z])(id|.*_id|id_.*|uuid|guid|iid)(?:$|[^a-zA-Z])',
         re.IGNORECASE
@@ -35,13 +45,11 @@ class Config:
         re.DOTALL | re.IGNORECASE
     )
 
-    # GraphQL global ID patterns (visibility only)
     GRAPHQL_ID_PATTERNS = [
         re.compile(r'^gid://([^/]+)/([^/]+)/(\d+)$'),
         re.compile(r'^urn:([^:]+):([^:]+):(\d+)$'),
     ]
 
-    # OWNERSHIP-GRADE KEYS ONLY
     SEMANTIC_ID_KEYS = {
         "user_id",
         "account_id",
@@ -54,13 +62,8 @@ class Config:
         "iid",
     }
 
-    BLACKLIST_VALUES = {
-        "true", "false", "null", "-1", "0", "1"
-    }
-
-    BLACKLIST_ENDPOINTS = {
-        "POST /messenger/web/ping"
-    }
+    BLACKLIST_VALUES = {"true", "false", "null", "-1", "0", "1"}
+    BLACKLIST_ENDPOINTS = {"POST /messenger/web/ping"}
 
 # ============================================================
 # XML / HTTP PARSING
@@ -77,18 +80,15 @@ def iter_http_messages(xml_path):
 
 def split_http_message(raw):
     text = raw.decode(errors="replace")
-    head, body = (
-        text.split("\r\n\r\n", 1)
-        if "\r\n\r\n" in text
-        else text.split("\n\n", 1)
-        if "\n\n" in text
-        else ("", "")
-    )
-    if not head:
+    if "\r\n\r\n" in text:
+        head, body = text.split("\r\n\r\n", 1)
+    elif "\n\n" in text:
+        head, body = text.split("\n\n", 1)
+    else:
         return "", {}, b""
 
     lines = head.splitlines()
-    request_line = lines[0]
+    request_line = lines[0] if lines else ""
     headers = {}
 
     for line in lines[1:]:
@@ -154,15 +154,6 @@ def extract_json_objects(body):
             i += 1
     return objs
 
-def extract_embedded_json(text):
-    out = []
-    for m in Config.EMBEDDED_RE.finditer(text):
-        try:
-            out.append(json.loads(m.group(1) or m.group(2)))
-        except:
-            pass
-    return out
-
 def walk_json_ids(obj):
     hits = []
     if isinstance(obj, dict):
@@ -225,15 +216,11 @@ class IDORAnalyzer:
         self.id_cooccurrence = defaultdict(set)
         self.status_by_msg = {}
 
-        # GraphQL visibility (context only)
         self.graphql_operations = defaultdict(list)
         self.msg_to_operation = {}
         self.id_to_operations = defaultdict(set)
 
-        # Filtered client-supplied IDs
         self.client_supplied_ids = set()
-
-        # Raw transactions
         self.raw_messages = {}
 
     def analyze(self):
@@ -432,27 +419,16 @@ def export_relevant_transactions(analyzer, out_path):
             f.write("\n\n")
 
 # ============================================================
-# MAIN (CLI)
+# MAIN
 # ============================================================
 
 def main():
-    if len(sys.argv) != 3:
-        print("Usage: python3 idor_analyzer.py <history.xml> <sitemap.xml>")
+    if len(sys.argv) < 2:
+        print("Usage: idor_analyzer.py <history.xml> [sitemap.xml]")
         sys.exit(1)
 
-    history_xml = Path(sys.argv[1]).resolve()
-    sitemap_xml = Path(sys.argv[2]).resolve()
-
-    if not history_xml.is_file():
-        print(f"ERROR: history XML not found: {history_xml}")
-        sys.exit(1)
-
-    if not sitemap_xml.is_file():
-        print(f"ERROR: sitemap XML not found: {sitemap_xml}")
-        sys.exit(1)
-
-    print(f"[*] Analyzing history: {history_xml}")
-    print(f"[*] Sitemap provided: {sitemap_xml}")
+    history_xml = sys.argv[1]
+    # sitemap_xml = sys.argv[2] if len(sys.argv) > 2 else None  # accepted, unused
 
     analyzer = IDORAnalyzer(history_xml)
     analyzer.analyze()
@@ -460,16 +436,21 @@ def main():
     if analyzer.graphql_operations:
         print_graphql_summary(analyzer)
 
-    print_idor_candidates(analyzer)
-    print_endpoint_grouped(analyzer)
-    print_cooccurrence(analyzer)
+    if view_mode in ("id", "both"):
+        print_idor_candidates(analyzer)
+    if view_mode in ("endpoint", "both"):
+        print_endpoint_grouped(analyzer)
+    if view_mode in ("cooccurrence", "both"):
+        print_cooccurrence(analyzer)
 
-    export_csv(analyzer, "idor_candidates.csv")
-    export_relevant_transactions(analyzer, "idor_relevant_transactions.txt")
+    out_csv = f"{Path(history_xml).stem}_idor_candidates.csv"
+    export_csv(analyzer, out_csv)
 
-    print("[+] Exported:")
-    print("    - idor_candidates.csv")
-    print("    - idor_relevant_transactions.txt")
+    tx_out = f"{Path(history_xml).stem}_idor_relevant_transactions.txt"
+    export_relevant_transactions(analyzer, tx_out)
+
+    print(f"\n[+] Exported to {out_csv}")
+    print(f"[+] Exported to {tx_out}")
 
 if __name__ == "__main__":
     main()
