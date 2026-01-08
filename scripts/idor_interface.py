@@ -149,7 +149,7 @@ def browse_tree_and_save():
         result = subprocess.run(
             ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
             cwd=output_dir,
-            text=True
+            text=True,
             capture_output=True,
             check=True
         )
