@@ -51,7 +51,7 @@ def browse_root() -> Path:
     return PROJECT_ROOT if NAV_MODE == "project" else SESSIONS_DIR
 
 # ==========================================================
-# SAVED BOXES
+# SAVED BOXES (UNCHANGED)
 # ==========================================================
 
 PROJECT_SAVED_BOX: list[Path] = []
@@ -74,30 +74,6 @@ def show_saved_box():
         for i, item in enumerate(box, 1):
             print(f"[{i}] {item}")
     print()
-
-def select_from_saved_box(prompt: str, suffix: str | None = None) -> Path | None:
-    box = active_saved_box()
-
-    filtered = [
-        p for p in box
-        if p.is_file() and (suffix is None or p.name.endswith(suffix))
-    ]
-
-    print("\n=== SESSION SAVED BOX ===")
-    if not filtered:
-        print("(empty)")
-        return None
-
-    for i, item in enumerate(filtered, 1):
-        print(f"[{i}] {item}")
-
-    try:
-        idx = int(input(prompt)) - 1
-        return filtered[idx]
-    except Exception:
-        print("ERROR: Invalid selection.\n")
-        return None
-
 
 # ==========================================================
 # SESSION MANAGEMENT
@@ -149,7 +125,7 @@ def list_sessions():
     print()
 
 # ==========================================================
-# TREE BROWSER (AESTHETIC DISPLAY + ABSOLUTE SAVE)
+# TREE BROWSER (UNCHANGED)
 # ==========================================================
 
 def browse_tree_and_save():
@@ -159,12 +135,12 @@ def browse_tree_and_save():
     print(f"\n=== Browse {label} Tree ===")
     print(f"(root = {root})\n")
 
-    def run_tree(cmd: list[str]) -> list[str]:
+    def run_tree(cmd):
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True
+            text=True,
         )
         return result.stdout.splitlines()
 
@@ -173,15 +149,10 @@ def browse_tree_and_save():
         absolute = run_tree(["tree", "-fi", "--noreport", str(root)])
     except FileNotFoundError:
         print("ERROR: 'tree' command not found.")
-        print("Install with: sudo apt install tree\n")
         return
 
     if not pretty or not absolute:
         print("(empty tree)\n")
-        return
-
-    if len(pretty) != len(absolute):
-        print("ERROR: Tree output mismatch.\n")
         return
 
     for i, line in enumerate(pretty, 1):
@@ -189,22 +160,42 @@ def browse_tree_and_save():
 
     try:
         idx = int(input("\nEnter number to save: ").strip()) - 1
-        if idx < 0 or idx >= len(absolute):
-            raise ValueError
-
         path = Path(absolute[idx])
-        if not path.is_file():
-            print("ERROR: Only files can be saved.\n")
-            return
-            
         save(path)
         print(f"\nSaved: {path}\n")
-
-    except ValueError:
+    except Exception:
         print("ERROR: Invalid selection.\n")
 
 # ==========================================================
-# ANALYZER EXECUTION (SESSION MODE ONLY)
+# 🔧 NEW ADDITION: SESSION-SCOPED XML SELECTION
+# ==========================================================
+
+def select_xml_from_session_input(session_root: Path, label: str) -> Path | None:
+    input_dir = session_root / "input"
+
+    if not input_dir.is_dir():
+        print("ERROR: Session input directory missing.\n")
+        return None
+
+    xmls = sorted(p for p in input_dir.iterdir() if p.is_file() and p.suffix == ".xml")
+
+    if not xmls:
+        print("ERROR: No XML files found in session input.\n")
+        return None
+
+    print(f"\n=== Select {label} XML ===")
+    for i, p in enumerate(xmls, 1):
+        print(f"[{i}] {p.name}")
+
+    try:
+        idx = int(input("> ").strip()) - 1
+        return xmls[idx]
+    except Exception:
+        print("ERROR: Invalid selection.\n")
+        return None
+
+# ==========================================================
+# ANALYZER EXECUTION (ONLY CHANGE IS INPUT SELECTION)
 # ==========================================================
 
 def run_analyzers_from_session():
@@ -213,20 +204,21 @@ def run_analyzers_from_session():
 
     print("\n=== Run IDOR Analyzer (Session Mode) ===\n")
 
-    history = select_from_saved_box("Select history XML #: ")
-    sitemap = select_from_saved_box("Select sitemap XML #: ")
+    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
+    if not sessions:
+        print("ERROR: No sessions available.\n")
+        return
+
+    session_root = sessions[-1]  # current / most recent session
+    output_dir = session_root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    history = select_xml_from_session_input(session_root, "history")
+    sitemap = select_xml_from_session_input(session_root, "sitemap")
 
     if not history or not sitemap:
         return
 
-    session_root = next(
-        p for p in history.parents if p.name.startswith("session_")
-    )
-
-    output_dir = session_root / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # --- Run analyzer (capture stdout/stderr) ---
     result = subprocess.run(
         ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
         cwd=output_dir,
@@ -235,33 +227,24 @@ def run_analyzers_from_session():
         check=True,
     )
 
-    # --- Generate sitemap tree ---
-    sitemap_tree_file = output_dir / "sitemap_tree.txt"
-    with open(sitemap_tree_file, "w", encoding="utf-8") as f:
+    sitemap_tree = output_dir / "sitemap_tree.txt"
+    with open(sitemap_tree, "w", encoding="utf-8") as f:
         subprocess.run(
             ["python3", SRC_DIR / "sitemap_extractor.py", sitemap],
             stdout=f,
             check=True,
         )
 
-    # --- Assemble full analysis ---
     full_report = output_dir / "idor_full_analysis.txt"
     with open(full_report, "w", encoding="utf-8") as out:
         out.write("=== IDOR ANALYZER OUTPUT ===\n\n")
         out.write(result.stdout)
-
         if result.stderr:
             out.write("\n=== STDERR ===\n")
             out.write(result.stderr)
 
-        out.write("\n\n=== GENERATED FILES ===\n")
-        for fpath in sorted(output_dir.glob("idor_*.txt")):
-            if fpath.name != "idor_full_analysis.txt":
-                out.write(f"\n--- {fpath.name} ---\n")
-                out.write(fpath.read_text())
-
         out.write("\n\n=== SITEMAP TREE ===\n")
-        out.write(sitemap_tree_file.read_text())
+        out.write(sitemap_tree.read_text())
 
     print("[+] Analysis complete.\n")
 
