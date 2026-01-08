@@ -10,7 +10,6 @@ from pathlib import Path
 
 def find_or_create_project_root(start: Path) -> Path:
     cur = start.resolve()
-
     while cur != cur.parent:
         if (cur / ".project_root").is_file():
             return cur
@@ -38,28 +37,51 @@ SESSIONS_DIR = PROJECT_ROOT / "sessions"
 SRC_DIR = PROJECT_ROOT / "src"
 
 # ==========================================================
-# SAVED BOX — MULTI-ITEM CLIPBOARD
+# NAVIGATION MODE
 # ==========================================================
 
-SAVED_BOX: list[Path] = []
+# Modes: "project" | "session"
+NAV_MODE = "project"
+
+def toggle_mode():
+    global NAV_MODE
+    NAV_MODE = "session" if NAV_MODE == "project" else "project"
+    print(f"\n[*] Switched to {NAV_MODE.upper()} mode\n")
+
+def browse_root() -> Path:
+    return PROJECT_ROOT if NAV_MODE == "project" else SESSIONS_DIR
+
+# ==========================================================
+# SAVED BOXES (SEPARATE, BY MODE)
+# ==========================================================
+
+PROJECT_SAVED_BOX: list[Path] = []
+SESSION_SAVED_BOX: list[Path] = []
+
+def active_saved_box() -> list[Path]:
+    return PROJECT_SAVED_BOX if NAV_MODE == "project" else SESSION_SAVED_BOX
 
 def save(item: Path):
-    SAVED_BOX.append(item)
+    active_saved_box().append(item)
 
 def show_saved_box():
-    print("\n=== Saved Box ===")
-    if not SAVED_BOX:
+    box = active_saved_box()
+    label = "PROJECT" if NAV_MODE == "project" else "SESSION"
+
+    print(f"\n=== {label} SAVED BOX ===")
+    if not box:
         print("(empty)")
     else:
-        for i, item in enumerate(SAVED_BOX, 1):
+        for i, item in enumerate(box, 1):
             print(f"[{i}] {item}")
     print()
 
 def select_from_saved_box(prompt: str) -> Path | None:
+    box = active_saved_box()
     show_saved_box()
     try:
         idx = int(input(prompt)) - 1
-        return SAVED_BOX[idx]
+        return box[idx]
     except Exception:
         print("ERROR: Invalid selection.\n")
         return None
@@ -94,14 +116,14 @@ def create_session():
     history.touch()
     sitemap.touch()
 
-    save(history)
-    save(sitemap)
+    SESSION_SAVED_BOX.append(history)
+    SESSION_SAVED_BOX.append(sitemap)
 
     print(f"\nSession created: {session_name}")
     print("Input files:")
     print(f"  - {history}")
     print(f"  - {sitemap}")
-    print("Saved to Saved Box.\n")
+    print("Saved to SESSION saved box.\n")
 
 def list_sessions():
     print("\n=== Existing Sessions ===\n")
@@ -114,16 +136,20 @@ def list_sessions():
     print()
 
 # ==========================================================
-# TREE BROWSER (SESSION INPUT)
+# TREE BROWSER (MODE-AWARE)
 # ==========================================================
 
 def browse_tree_and_save():
-    print("\n=== Browse Project Tree ===\n")
+    root = browse_root()
+    label = "PROJECT" if NAV_MODE == "project" else "SESSION"
 
-    paths = []
-    for root, _, files in os.walk(SESSIONS_DIR):
+    print(f"\n=== Browse {label} Tree ===")
+    print(f"(root = {root})\n")
+
+    paths: list[Path] = []
+    for r, _, files in os.walk(root):
         for f in files:
-            paths.append(Path(root) / f)
+            paths.append(Path(r) / f)
 
     if not paths:
         print("(no files)\n")
@@ -140,16 +166,24 @@ def browse_tree_and_save():
         print("ERROR: Invalid selection.\n")
 
 # ==========================================================
-# ANALYZER EXECUTION (Messages 6–9)
+# ANALYZER EXECUTION (SESSION MODE ONLY)
 # ==========================================================
 
 def run_analyzers_from_session():
-    print("\n=== Run IDOR Analyzer (Session) ===\n")
+    if NAV_MODE != "session":
+        print("\nERROR: Switch to SESSION mode to run analyzers.\n")
+        return
+
+    print("\n=== Run IDOR Analyzer (Session Mode) ===\n")
 
     history = select_from_saved_box("Select history XML #: ")
     sitemap = select_from_saved_box("Select sitemap XML #: ")
 
     if not history or not sitemap:
+        return
+
+    if "history_" not in history.name or "sitemap_" not in sitemap.name:
+        print("ERROR: Invalid XML pairing.\n")
         return
 
     session_root = history.parents[2]
@@ -179,42 +213,42 @@ def run_analyzers_from_session():
             check=True,
         )
 
-    # --- COLLATION (Message 7) ---
+    # --- COLLATION ---
     full_report = output_dir / "idor_full_analysis.txt"
     with open(full_report, "w", encoding="utf-8") as out:
         out.write("=== IDOR ANALYSIS ===\n\n")
-        for f in output_dir.glob("idor_*.txt"):
-            out.write(f"\n--- {f.name} ---\n")
-            out.write(f.read_text())
+        for fpath in sorted(output_dir.glob("idor_*.txt")):
+            out.write(f"\n--- {fpath.name} ---\n")
+            out.write(fpath.read_text())
 
         out.write("\n\n=== SITEMAP TREE ===\n\n")
         out.write(sitemap_tree_file.read_text())
 
     print("[+] Analysis complete.")
-    print(f"    - {full_report}")
-    print()
+    print(f"    - {full_report}\n")
 
 # ==========================================================
 # MENU
 # ==========================================================
 
-MENU = f"""
-=== {PROJECT_ROOT.name} IDOR INTERFACE ===
+def show_menu():
+    print(f"\n=== {PROJECT_ROOT.name} IDOR INTERFACE ===")
+    print(f"Mode: {NAV_MODE.upper()}\n")
 
-1) Create new session
-2) List sessions
-3) Browse tree & save input
-4) Run IDOR analyzer (session)
-s) Show saved box
-q) Quit
-"""
+    print("1) Create new session")
+    print("2) List sessions")
+    print("3) Browse tree & save path")
+    print("4) Run IDOR analyzer (session mode)")
+    print("m) Toggle navigation mode (project / session)")
+    print("s) Show saved box")
+    print("q) Quit\n")
 
 # ==========================================================
 # MAIN LOOP
 # ==========================================================
 
 while True:
-    print(MENU)
+    show_menu()
     choice = input("> ").strip()
 
     match choice:
@@ -226,6 +260,8 @@ while True:
             browse_tree_and_save()
         case "4":
             run_analyzers_from_session()
+        case "m" | "M":
+            toggle_mode()
         case "s" | "S":
             show_saved_box()
         case "q" | "Q":
