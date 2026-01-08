@@ -202,7 +202,9 @@ def run_analyzers_from_session():
     if not history or not sitemap:
         return
 
-    session_root = history.parents[2]
+    session_root = next(
+        p for p in history.parents if p.name.startswith("session_")
+    )
     output_dir = session_root / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
