@@ -4,15 +4,7 @@
 # GraphQL + REST + ORIGIN TRACKING (ANALYSIS ONLY)
 # ==================================================
 
-# @title IDOR Analyzer (Paste XML filename below and click Run)
-
-xml_file = "session.xml"   # @param {type:"string"}
-view_mode = "both"         # @param ["id", "endpoint", "cooccurrence", "both"]
-full_report = True         # @param {type:"boolean"}
-summarize_existing_csv = ""  # @param {type:"string"}
-
-# ========== SCRIPT START ==========
-
+import sys
 import csv
 import base64
 import json
@@ -440,34 +432,44 @@ def export_relevant_transactions(analyzer, out_path):
             f.write("\n\n")
 
 # ============================================================
-# MAIN
+# MAIN (CLI)
 # ============================================================
 
 def main():
-    xml_path = f"/content/{xml_file}"
-    analyzer = IDORAnalyzer(xml_path)
+    if len(sys.argv) != 3:
+        print("Usage: python3 idor_analyzer.py <history.xml> <sitemap.xml>")
+        sys.exit(1)
+
+    history_xml = Path(sys.argv[1]).resolve()
+    sitemap_xml = Path(sys.argv[2]).resolve()
+
+    if not history_xml.is_file():
+        print(f"ERROR: history XML not found: {history_xml}")
+        sys.exit(1)
+
+    if not sitemap_xml.is_file():
+        print(f"ERROR: sitemap XML not found: {sitemap_xml}")
+        sys.exit(1)
+
+    print(f"[*] Analyzing history: {history_xml}")
+    print(f"[*] Sitemap provided: {sitemap_xml}")
+
+    analyzer = IDORAnalyzer(history_xml)
     analyzer.analyze()
 
     if analyzer.graphql_operations:
         print_graphql_summary(analyzer)
 
-    if view_mode in ("id", "both"):
-        print_idor_candidates(analyzer)
-    if view_mode in ("endpoint", "both"):
-        print_endpoint_grouped(analyzer)
-    if view_mode in ("cooccurrence", "both"):
-        print_cooccurrence(analyzer)
+    print_idor_candidates(analyzer)
+    print_endpoint_grouped(analyzer)
+    print_cooccurrence(analyzer)
 
-    out_csv = f"{Path(xml_file).stem}_idor_candidates.csv"
-    export_csv(analyzer, f"/content/{out_csv}")
+    export_csv(analyzer, "idor_candidates.csv")
+    export_relevant_transactions(analyzer, "idor_relevant_transactions.txt")
 
-    tx_out = f"{Path(xml_file).stem}_idor_relevant_transactions.txt"
-    export_relevant_transactions(analyzer, f"/content/{tx_out}")
+    print("[+] Exported:")
+    print("    - idor_candidates.csv")
+    print("    - idor_relevant_transactions.txt")
 
-    print(f"\n[+] Exported to {out_csv}")
-    print(f"[+] Exported to {tx_out}")
-
-if summarize_existing_csv:
-    print("CSV summarization not enabled in analysis-only build.")
-else:
+if __name__ == "__main__":
     main()
