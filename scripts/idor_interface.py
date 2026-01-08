@@ -40,8 +40,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 # NAVIGATION MODE
 # ==========================================================
 
-# Modes: "project" | "session"
-NAV_MODE = "project"
+NAV_MODE = "project"  # "project" | "session"
 
 def toggle_mode():
     global NAV_MODE
@@ -52,7 +51,7 @@ def browse_root() -> Path:
     return PROJECT_ROOT if NAV_MODE == "project" else SESSIONS_DIR
 
 # ==========================================================
-# SAVED BOXES (SEPARATE, BY MODE)
+# SAVED BOXES
 # ==========================================================
 
 PROJECT_SAVED_BOX: list[Path] = []
@@ -136,7 +135,7 @@ def list_sessions():
     print()
 
 # ==========================================================
-# TREE BROWSER (MODE-AWARE)
+# TREE BROWSER (AESTHETIC DISPLAY + ABSOLUTE SAVE)
 # ==========================================================
 
 def browse_tree_and_save():
@@ -146,23 +145,45 @@ def browse_tree_and_save():
     print(f"\n=== Browse {label} Tree ===")
     print(f"(root = {root})\n")
 
-    paths: list[Path] = []
-    for r, _, files in os.walk(root):
-        for f in files:
-            paths.append(Path(r) / f)
-
-    if not paths:
-        print("(no files)\n")
-        return
-
-    for i, p in enumerate(paths, 1):
-        print(f"[{i}] {p}")
+    def run_tree(cmd: list[str]) -> list[str]:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        return result.stdout.splitlines()
 
     try:
-        idx = int(input("\nEnter number to save: ")) - 1
-        save(paths[idx])
-        print(f"\nSaved: {paths[idx]}\n")
-    except Exception:
+        pretty = run_tree(["tree", "--noreport", str(root)])
+        absolute = run_tree(["tree", "-fi", "--noreport", str(root)])
+    except FileNotFoundError:
+        print("ERROR: 'tree' command not found.")
+        print("Install with: sudo apt install tree\n")
+        return
+
+    # Empty tree is a valid state (e.g. no sessions yet)
+    if not pretty or not absolute:
+        print("(empty tree)\n")
+        return
+
+    if len(pretty) != len(absolute):
+        print("ERROR: Tree output mismatch.\n")
+        return
+
+    for i, line in enumerate(pretty, 1):
+        print(f"[{i}] {line}")
+
+    try:
+        idx = int(input("\nEnter number to save: ").strip()) - 1
+        if idx < 0 or idx >= len(absolute):
+            raise ValueError
+
+        path = Path(absolute[idx])
+        save(path)
+        print(f"\nSaved: {path}\n")
+
+    except ValueError:
         print("ERROR: Invalid selection.\n")
 
 # ==========================================================
@@ -171,7 +192,6 @@ def browse_tree_and_save():
 
 def run_analyzers_from_session():
     if NAV_MODE != "session":
-        print("\nERROR: Switch to SESSION mode to run analyzers.\n")
         return
 
     print("\n=== Run IDOR Analyzer (Session Mode) ===\n")
@@ -182,29 +202,15 @@ def run_analyzers_from_session():
     if not history or not sitemap:
         return
 
-    if "history_" not in history.name or "sitemap_" not in sitemap.name:
-        print("ERROR: Invalid XML pairing.\n")
-        return
-
     session_root = history.parents[2]
     output_dir = session_root / "output"
 
-    print(f"\n[*] Running analyzers for {session_root.name}")
-    print(f"[*] Output dir: {output_dir}\n")
-
-    # --- IDOR ANALYZER ---
     subprocess.run(
-        [
-            "python3",
-            SRC_DIR / "idor_analyzer.py",
-            history,
-            sitemap,
-        ],
+        ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
         cwd=output_dir,
         check=True,
     )
 
-    # --- SITEMAP EXTRACTOR ---
     sitemap_tree_file = output_dir / "sitemap_tree.txt"
     with open(sitemap_tree_file, "w", encoding="utf-8") as f:
         subprocess.run(
@@ -213,19 +219,15 @@ def run_analyzers_from_session():
             check=True,
         )
 
-    # --- COLLATION ---
     full_report = output_dir / "idor_full_analysis.txt"
     with open(full_report, "w", encoding="utf-8") as out:
-        out.write("=== IDOR ANALYSIS ===\n\n")
         for fpath in sorted(output_dir.glob("idor_*.txt")):
             out.write(f"\n--- {fpath.name} ---\n")
             out.write(fpath.read_text())
-
-        out.write("\n\n=== SITEMAP TREE ===\n\n")
+        out.write("\n=== SITEMAP TREE ===\n")
         out.write(sitemap_tree_file.read_text())
 
-    print("[+] Analysis complete.")
-    print(f"    - {full_report}\n")
+    print("[+] Analysis complete.\n")
 
 # ==========================================================
 # MENU
@@ -235,10 +237,15 @@ def show_menu():
     print(f"\n=== {PROJECT_ROOT.name} IDOR INTERFACE ===")
     print(f"Mode: {NAV_MODE.upper()}\n")
 
-    print("1) Create new session")
-    print("2) List sessions")
+    if NAV_MODE == "session":
+        print("1) Create new session")
+        print("2) List sessions")
+
     print("3) Browse tree & save path")
-    print("4) Run IDOR analyzer (session mode)")
+
+    if NAV_MODE == "session":
+        print("4) Run IDOR analyzer")
+
     print("m) Toggle navigation mode (project / session)")
     print("s) Show saved box")
     print("q) Quit\n")
@@ -253,13 +260,16 @@ while True:
 
     match choice:
         case "1":
-            create_session()
+            if NAV_MODE == "session":
+                create_session()
         case "2":
-            list_sessions()
+            if NAV_MODE == "session":
+                list_sessions()
         case "3":
             browse_tree_and_save()
         case "4":
-            run_analyzers_from_session()
+            if NAV_MODE == "session":
+                run_analyzers_from_session()
         case "m" | "M":
             toggle_mode()
         case "s" | "S":
