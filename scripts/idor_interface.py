@@ -147,10 +147,11 @@ def browse_tree_and_save():
 
     def run_tree(cmd: list[str]) -> list[str]:
         result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
+            cwd=output_dir,
             text=True
+            capture_output=True,
+            check=True
         )
         return result.stdout.splitlines()
 
@@ -202,18 +203,28 @@ def run_analyzers_from_session():
     if not history or not sitemap:
         return
 
+    # Robustly derive session root from selected history file
     session_root = next(
         p for p in history.parents if p.name.startswith("session_")
     )
+
     output_dir = session_root / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    subprocess.run(
+    # --------------------------------------------------
+    # Run IDOR analyzer and CAPTURE stdout/stderr
+    # --------------------------------------------------
+    result = subprocess.run(
         ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
         cwd=output_dir,
+        text=True,
+        capture_output=True,
         check=True,
     )
 
+    # --------------------------------------------------
+    # Generate sitemap tree
+    # --------------------------------------------------
     sitemap_tree_file = output_dir / "sitemap_tree.txt"
     with open(sitemap_tree_file, "w", encoding="utf-8") as f:
         subprocess.run(
@@ -222,12 +233,25 @@ def run_analyzers_from_session():
             check=True,
         )
 
+    # --------------------------------------------------
+    # Assemble full analysis report
+    # --------------------------------------------------
     full_report = output_dir / "idor_full_analysis.txt"
     with open(full_report, "w", encoding="utf-8") as out:
+        out.write("=== IDOR ANALYZER OUTPUT ===\n\n")
+        out.write(result.stdout)
+
+        if result.stderr:
+            out.write("\n=== STDERR ===\n")
+            out.write(result.stderr)
+
+        out.write("\n\n=== GENERATED FILES ===\n")
         for fpath in sorted(output_dir.glob("idor_*.txt")):
-            out.write(f"\n--- {fpath.name} ---\n")
-            out.write(fpath.read_text())
-        out.write("\n=== SITEMAP TREE ===\n")
+            if fpath.name != "idor_full_analysis.txt":
+                out.write(f"\n--- {fpath.name} ---\n")
+                out.write(fpath.read_text())
+
+        out.write("\n\n=== SITEMAP TREE ===\n")
         out.write(sitemap_tree_file.read_text())
 
     print("[+] Analysis complete.\n")
