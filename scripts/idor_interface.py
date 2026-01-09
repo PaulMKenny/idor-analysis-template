@@ -195,6 +195,44 @@ def select_xml_from_session_input(session_root: Path, label: str) -> Path | None
         return None
 
 # ==========================================================
+# NEW ADDITION: Raw transaction dump option
+# ==========================================================
+
+
+def dump_raw_http_from_session():
+    if NAV_MODE != "session":
+        return
+
+    print("\n=== Dump Raw HTTP History (Session Mode) ===\n")
+
+    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
+    if not sessions:
+        print("ERROR: No sessions available.\n")
+        return
+
+    session_root = sessions[-1]  # most recent session
+    output_dir = session_root / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    history = select_xml_from_session_input(session_root, "history")
+    if not history:
+        return
+
+    raw_dump_file = output_dir / "raw_http_dump.txt"
+
+    with open(raw_dump_file, "w", encoding="utf-8") as f:
+        subprocess.run(
+            ["python3", SRC_DIR / "raw_http_dump.py", history],
+            stdout=f,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+
+    print("[+] Raw HTTP history written to:")
+    print(f"    {raw_dump_file}\n")
+
+
+# ==========================================================
 # ANALYZER EXECUTION (ONLY CHANGE IS INPUT SELECTION)
 # ==========================================================
 
@@ -248,6 +286,9 @@ def run_analyzers_from_session():
 
     print("[+] Analysis complete.\n")
 
+
+
+
 # ==========================================================
 # MENU
 # ==========================================================
@@ -264,6 +305,7 @@ def show_menu():
 
     if NAV_MODE == "session":
         print("4) Run IDOR analyzer")
+        print("5) Dump raw HTTP history")
 
     print("m) Toggle navigation mode (project / session)")
     print("s) Show saved box")
@@ -289,6 +331,10 @@ while True:
         case "4":
             if NAV_MODE == "session":
                 run_analyzers_from_session()
+        case "5":
+            if NAV_MODE == "session":
+                dump_raw_http_from_session()
+
         case "m" | "M":
             toggle_mode()
         case "s" | "S":
