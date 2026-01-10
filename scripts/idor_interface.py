@@ -236,56 +236,6 @@ def dump_raw_http_from_session():
 # ANALYZER EXECUTION (ONLY CHANGE IS INPUT SELECTION)
 # ==========================================================
 
-def run_analyzers_from_session():
-    if NAV_MODE != "session":
-        return
-
-    print("\n=== Run IDOR Analyzer (Session Mode) ===\n")
-
-    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
-    if not sessions:
-        print("ERROR: No sessions available.\n")
-        return
-
-    session_root = sessions[-1]  # current / most recent session
-    output_dir = session_root / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    history = select_xml_from_session_input(session_root, "history")
-    sitemap = select_xml_from_session_input(session_root, "sitemap")
-
-    if not history or not sitemap:
-        return
-
-    result = subprocess.run(
-        ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
-        cwd=output_dir,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-
-    sitemap_tree = output_dir / "sitemap_tree.txt"
-    with open(sitemap_tree, "w", encoding="utf-8") as f:
-        subprocess.run(
-            ["python3", SRC_DIR / "sitemap_extractor.py", sitemap],
-            stdout=f,
-            check=True,
-        )
-
-    full_report = output_dir / "idor_full_analysis.txt"
-    with open(full_report, "w", encoding="utf-8") as out:
-        out.write("=== IDOR ANALYZER OUTPUT ===\n\n")
-        out.write(result.stdout)
-        if result.stderr:
-            out.write("\n=== STDERR ===\n")
-            out.write(result.stderr)
-
-        out.write("\n\n=== SITEMAP TREE ===\n")
-        out.write(sitemap_tree.read_text())
-
-    print("[+] Analysis complete.\n")
-
 # Add to idor_interface.py
 
 def run_permutator_from_session():
