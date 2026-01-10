@@ -645,12 +645,6 @@ def main():
     analyzer = IDORAnalyzer(args.xml)
     analyzer.analyze()
 
-    candidates = analyzer.get_candidates_for_msg(args.msg_id)
-
-    if not candidates:
-        print("No IDOR candidates associated with this message.")
-        sys.exit(0)
-
     # Get request details
     raw_req = analyzer.raw_messages[args.msg_id]["request"]
     first_line = raw_req.splitlines()[0]
@@ -662,22 +656,64 @@ def main():
     method, path = parts[0], parts[1]
     host = analyzer.host_by_msg.get(args.msg_id, "unknown")
 
-    # Select candidates
+    # Extract IDs actually in the path
+    from idor_analyzer import extract_path_ids
+    path_ids = extract_path_ids(path)  # [(key, value), ...]
+    path_id_values = {v for k, v in path_ids}
+
+    candidates = analyzer.get_candidates_for_msg(args.msg_id)
+
+    if not candidates:
+        print("No IDOR candidates associated with this message.")
+        sys.exit(0)
+
+    # Match candidates to path IDs - prefer candidates whose ID is in the path
+    path_candidates = [c for c in candidates if c.id_value in path_id_values]
+    other_candidates = [c for c in candidates if c.id_value not in path_id_values]
+    
+    # Sort each group by score
+    path_candidates.sort(key=lambda c: c.score, reverse=True)
+    other_candidates.sort(key=lambda c: c.score, reverse=True)
+    
+    # Prioritize path candidates
+    sorted_candidates = path_candidates + other_candidates
+
+    if not sorted_candidates:
+        print("No candidates found.")
+        sys.exit(0)
+
+    # Select candidates to process
     if args.all_candidates:
-        selected = sorted(candidates, key=lambda c: c.score, reverse=True)
+        selected = sorted_candidates
     else:
-        selected = [sorted(candidates, key=lambda c: c.score, reverse=True)[0]]
+        # Take top path candidate, or top other if no path candidates
+        selected = [sorted_candidates[0]]
 
     all_mutations: List[StartLineMutation] = []
     seen: set = set()
+    processed_candidates: List[IDCandidate] = []
 
     for candidate in selected:
+        # Only generate mutations if ID is actually in path
+        if candidate.id_value not in path:
+            if args.verbose:
+                print(f"[!] Skipping {candidate.key}={candidate.id_value} (not in path)")
+            continue
+        
+        processed_candidates.append(candidate)
         mutations = generate_mutations(method, path, candidate)
+        
         for m in mutations:
             key = (m.method, m.path)
             if key not in seen:
                 seen.add(key)
                 all_mutations.append(m)
+
+    if not all_mutations:
+        print("No mutations generated. Candidate IDs not found in request path.")
+        print(f"Path: {path}")
+        print(f"Candidate IDs: {[c.id_value for c in selected]}")
+        sys.exit(0)
 
     # Output
     if args.format == "burp":
@@ -690,7 +726,16 @@ def main():
             "msg_id": args.msg_id,
             "host": host,
             "original": f"{method} {path}",
-            "candidates": len(selected),
+            "candidates": [
+                {
+                    "key": c.key,
+                    "value": c.id_value,
+                    "origin": c.origin,
+                    "sources": list(c.sources),
+                    "token_bound": c.token_bound,
+                }
+                for c in processed_candidates
+            ],
             "mutations": [
                 {
                     "method": m.method,
@@ -710,9 +755,15 @@ def main():
         print(f"Message ID: {args.msg_id}")
         print(f"Host: {host}")
         print(f"Original: {method} {path}")
-        print(f"Candidates: {len(selected)}")
+        print(f"Path IDs found: {path_ids}")
+        print(f"Candidates processed: {len(processed_candidates)}")
         print(f"Total mutations: {len(all_mutations)}")
-        print(format_output(all_mutations, method, path, selected[0], args.verbose))
+        
+        if processed_candidates:
+            print(format_output(all_mutations, method, path, processed_candidates[0], args.verbose))
+        else:
+            print("\nNo candidates with IDs in path.")
+        
         print()
 
 
