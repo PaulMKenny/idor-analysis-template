@@ -2,6 +2,7 @@
 # ==================================================
 # IDOR ANALYZER — ZERO FALSE NEGATIVE EDITION (MERGED)
 # GraphQL + REST + TOKEN ANALYSIS + CO-OCCURRENCE + RANKED TRIAGE
+# + SEMANTIC TIERING (AUTH-RELEVANT vs INFORMATIONAL)
 # ==================================================
 
 """
@@ -12,12 +13,12 @@ CLI usage:
 Architecture:
     - EXTRACTION: Lossless, aggressive
     - CLASSIFICATION: Metadata tagging, no filtering
-    - SCORING: Bayesian ranking with explainable signals
+    - SCORING: Bayesian-ish ranking with explainable signals
     - OUTPUT: Ordered triage queue with "why" fields + co-occurrence
 
 Zero False Negative Guarantee:
-    - All candidates appear in output
-    - Signals affect SCORE, never INCLUSION
+    - All candidates appear in output (Tier 1 or Tier 2)
+    - Signals affect SCORE or TIER, never INCLUSION
     - Minimum score is 1 (never 0)
 
 Merged features:
@@ -26,6 +27,8 @@ Merged features:
     - Explainable scoring (score_reasons per candidate)
     - Dereference detection (request→response coupling)
     - Co-occurrence visibility (structural + replay patterns)
+    - Endpoint directionality mapping
+    - Two-tier output (authorization-relevant vs informational)
 """
 
 import sys
@@ -49,11 +52,11 @@ from dataclasses import dataclass, field
 class Config:
     """
     Configuration for IDOR analysis.
-    
-    CRITICAL: These are for PRIORITIZATION, not FILTERING.
-    Nothing here should cause candidates to be excluded.
+
+    CRITICAL: These are for PRIORITIZATION and TIERING, not FILTERING.
+    Nothing here should cause candidates to be excluded from the overall output.
     """
-    
+
     # ID key patterns (disciplined - focused on actual ID fields)
     KEY_REGEX = re.compile(
         r'(?:^|[^a-zA-Z])(id|.*_id|id_.*|uuid|guid|iid)(?:$|[^a-zA-Z])',
@@ -93,7 +96,7 @@ class Config:
         "tenant_id", "tenantid",
         "workspace_id", "workspaceid",
         "team_id", "teamid",
-        
+
         # Object selectors
         "board_id", "boardid",
         "project_id", "projectid",
@@ -123,12 +126,12 @@ class Config:
     LOW_LIKELIHOOD_VALUES = {"true", "false", "null", "-1", "0", "1", ""}
 
     # === HOST PRIORITIZATION (de-prioritize, not skip) ===
-    
+
     PRIMARY_HOST_SUFFIXES = {
         "monday.com",
         # Add target-specific domains here
     }
-    
+
     DEPRIORITIZE_HOST_SUFFIXES = {
         # Analytics / tracking
         "facebook.net", "facebook.com", "fbcdn.net",
@@ -158,7 +161,7 @@ class Config:
         # Payment (usually isolated)
         "stripe.com", "braintreegateway.com", "paypal.com",
     }
-    
+
     # Endpoint substrings that indicate telemetry (penalize, not exclude)
     DEPRIORITIZE_ENDPOINT_SUBSTRINGS = {
         "/prod/event",
@@ -176,9 +179,9 @@ class Config:
     }
 
     # === MUTATION DETECTION ===
-    
+
     MUTATION_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
-    
+
     MUTATION_OP_KEYWORDS = {
         "create", "update", "delete", "remove", "add", "set",
         "change", "move", "copy", "rename", "archive", "restore",
@@ -187,11 +190,64 @@ class Config:
     }
 
     # === TOKEN DETECTION ===
-    
+
     TOKEN_PARAM_NAMES = {
         "token", "access_token", "auth_token", "jwt", "session_token",
         "api_token", "bearer", "id_token", "refresh_token", "apikey",
         "api_key", "auth", "authorization", "credential",
+    }
+
+    # === SEMANTIC TIERING (classification, not filtering) ===
+
+    # "Probably telemetry" keys - treated as telemetry only when ALL strict conditions pass
+    PROBABLY_TELEMETRY_KEYS = {
+        "visitor_id", "session_id", "anonymous_id",
+        "fs_session_url", "fs_session_started_at",
+        "ga_client_id", "fbp", "fbc",
+        "_ga", "_gid", "_fbp",
+    }
+
+    # Strict analytics hosts - exact domains only
+    STRICT_ANALYTICS_HOSTS = {
+        "www.google-analytics.com",
+        "analytics.google.com",
+        "www.googletagmanager.com",
+        "connect.facebook.net",
+        "www.facebook.com",
+        "rs.fullstory.com",
+        "api.segment.io",
+        "cdn.segment.com",
+        "api.mixpanel.com",
+        "api.amplitude.com",
+        "in.hotjar.com",
+        "o0.ingest.sentry.io",
+    }
+
+    # Strict telemetry paths - exact matches / startswith (to allow /tr or /tr/)
+    STRICT_TELEMETRY_PATHS = {
+        "/collect",
+        "/j/collect",
+        "/g/collect",
+        "/tr/",
+        "/tr",
+        "/beacon",
+        "/v1/track",
+        "/v1/identify",
+        "/track",
+        "/prod/event",
+    }
+
+    # Nonce keys (WITHOUT 'state' - OAuth state can contain real IDs)
+    NONCE_KEYS = {
+        "nonce", "csrf", "csrf_token", "challenge",
+        "code_challenge", "code_verifier"
+    }
+
+    # Timestamp keys (note: exp/iat/nbf exist in JWTs too; tiering checks selector usage)
+    TIMESTAMP_KEYS = {
+        "timestamp", "ts", "time", "created_at", "updated_at",
+        "modified_at", "sent_at", "received_at", "expires_at",
+        "exp", "iat", "nbf"
     }
 
 
@@ -204,12 +260,12 @@ class CandidateScore:
     """Explainable score for an IDOR candidate."""
     total: int = 50
     reasons: List[str] = field(default_factory=list)
-    
+
     def adjust(self, delta: int, reason: str):
         self.total += delta
-        if reason:  # Only add non-empty reasons
+        if reason:
             self.reasons.append(f"{'+' if delta >= 0 else ''}{delta}: {reason}")
-    
+
     def finalize(self) -> int:
         """Ensure minimum score of 1 (zero false negative guarantee)."""
         return max(1, self.total)
@@ -231,7 +287,7 @@ class IDCandidate:
     key: str
     endpoint: str
     score: int
-    score_reasons: Tuple[str, ...]  # Tuple for immutability
+    score_reasons: Tuple[str, ...]
     origin: str
     sources: Tuple[str, ...]
     host_priority: str
@@ -245,6 +301,8 @@ class IDCandidate:
     directions: str
     request_msgs: Tuple[int, ...]
     response_msgs: Tuple[int, ...]
+    is_informational: bool = False
+    informational_reason: str = ""
 
 
 # ============================================================
@@ -273,7 +331,7 @@ def split_http_message(raw: bytes) -> Tuple[str, Dict[str, str], bytes]:
     """Split HTTP message into request/status line, headers, and body."""
     if not raw:
         return "", {}, b""
-    
+
     if b"\r\n\r\n" in raw:
         head_b, body = raw.split(b"\r\n\r\n", 1)
     elif b"\n\n" in raw:
@@ -360,15 +418,15 @@ def get_host_priority(host: str) -> str:
     """
     if not host:
         return "unknown"
-    
+
     host_lower = host.lower()
-    
+
     if any(host_lower.endswith(suf) for suf in Config.PRIMARY_HOST_SUFFIXES):
         return "primary"
-    
+
     if any(host_lower.endswith(suf) for suf in Config.DEPRIORITIZE_HOST_SUFFIXES):
         return "third_party"
-    
+
     return "related"
 
 
@@ -395,28 +453,64 @@ def is_likely_id_value(value: str) -> bool:
         return False
     if not isinstance(value, str):
         value = str(value)
-    
+
     v = value.strip()
     if not v or v.lower() in Config.LOW_LIKELIHOOD_VALUES:
         return False
-    
+
     # Numeric ID (3+ digits)
     if v.isdigit() and len(v) >= 3:
         return True
-    
-    # UUID-like
+
+    # UUID-like / hex-ish
     if re.match(r'^[a-f0-9-]{8,}$', v, re.IGNORECASE):
         return True
-    
-    # Base64-ish ID
+
+    # Base64-ish / opaque IDs
     if re.match(r'^[A-Za-z0-9_-]{16,}$', v):
         return True
-    
+
     # GraphQL global IDs
     for pat in Config.GRAPHQL_ID_PATTERNS:
         if pat.match(v):
             return True
-    
+
+    return False
+
+
+def _is_high_entropy_value(value: str) -> bool:
+    """Check if value looks like telemetry entropy (UUID, random string)."""
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if not value:
+        return False
+
+    # UUID v4 pattern
+    if re.match(
+        r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$',
+        value, re.IGNORECASE
+    ):
+        return True
+
+    # Long hex string (32+ chars)
+    if re.match(r'^[a-f0-9]{32,}$', value, re.IGNORECASE):
+        return True
+
+    # GA-style client ID (numeric.numeric)
+    if re.match(r'^\d+\.\d+$', value):
+        return True
+
+    # Long random alphanumeric (24+ chars, mixed case/digits)
+    if len(value) >= 24 and re.match(r'^[A-Za-z0-9_-]+$', value):
+        has_upper = any(c.isupper() for c in value)
+        has_lower = any(c.islower() for c in value)
+        has_digit = any(c.isdigit() for c in value)
+        if sum([has_upper, has_lower, has_digit]) >= 2:
+            return True
+
     return False
 
 
@@ -427,20 +521,20 @@ def is_likely_id_value(value: str) -> bool:
 def extract_json_objects_with_confidence(body: bytes, content_type: str) -> List[Tuple[Any, str]]:
     """
     Extract JSON objects from body with confidence levels.
-    
+
     Returns: List of (obj, confidence) tuples
     Confidence: "high", "medium", "low"
-    
+
     CRITICAL: ALWAYS attempts extraction. Never returns empty due to content-type.
     """
     if not body:
         return []
-    
+
     results: List[Tuple[Any, str]] = []
     ct = (content_type or "").lower()
     b = body.lstrip()
     text = body.decode(errors="replace")
-    
+
     # HIGH confidence: Proper JSON content-type
     if "application/json" in ct:
         try:
@@ -449,7 +543,7 @@ def extract_json_objects_with_confidence(body: bytes, content_type: str) -> List
             return results
         except Exception:
             pass
-    
+
     # MEDIUM confidence: Looks like JSON
     if b.startswith(b"{") or b.startswith(b"["):
         try:
@@ -458,7 +552,7 @@ def extract_json_objects_with_confidence(body: bytes, content_type: str) -> List
             return results
         except Exception:
             pass
-    
+
     # MEDIUM confidence: JSONP callback wrapper
     try:
         jsonp_match = re.match(
@@ -472,7 +566,7 @@ def extract_json_objects_with_confidence(body: bytes, content_type: str) -> List
             return results
     except Exception:
         pass
-    
+
     # LOW confidence: Embedded JSON in HTML
     if "text/html" in ct or b.startswith(b"<!") or b.startswith(b"<html") or b.startswith(b"<"):
         for pattern in Config.EMBEDDED_JSON_PATTERNS:
@@ -486,7 +580,7 @@ def extract_json_objects_with_confidence(body: bytes, content_type: str) -> List
                         results.append((obj, "low"))
                     except Exception:
                         pass
-    
+
     # LOW confidence: Aggressive scan for JSON-like structures
     if not results:
         decoder = json.JSONDecoder()
@@ -495,16 +589,14 @@ def extract_json_objects_with_confidence(body: bytes, content_type: str) -> List
             if text[i] in '{[':
                 try:
                     obj, end = decoder.raw_decode(text, i)
-                    if isinstance(obj, dict) and obj:
-                        results.append((obj, "low"))
-                    elif isinstance(obj, list) and obj:
+                    if (isinstance(obj, dict) and obj) or (isinstance(obj, list) and obj):
                         results.append((obj, "low"))
                     i = end
                     continue
                 except Exception:
                     pass
             i += 1
-    
+
     return results
 
 
@@ -558,16 +650,16 @@ def worsen_confidence(prev: str, new: str) -> str:
 class TokenAnalyzer:
     """
     Detects signed tokens and extracts embedded IDs.
-    
+
     CRITICAL: This is for PRIORITIZATION ONLY.
     Never suppress candidates based on token detection.
     """
-    
+
     # JWT: three base64url segments separated by dots
     JWT_PATTERN = re.compile(
         r'eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+'
     )
-    
+
     # Signed payload patterns (non-JWT)
     SIGNED_PAYLOAD_PATTERNS = [
         re.compile(r'[A-Za-z0-9+/=]{50,}--[a-f0-9]{40,}'),
@@ -577,23 +669,23 @@ class TokenAnalyzer:
     def __init__(self):
         self.token_bindings: Dict[int, TokenBinding] = {}
         self.detected_tokens: Dict[int, List[Tuple[str, str]]] = {}
-    
+
     def analyze_request(
-        self, 
-        msg_id: int, 
-        req_headers: Dict[str, str], 
-        path: str, 
+        self,
+        msg_id: int,
+        req_headers: Dict[str, str],
+        path: str,
         body: bytes
     ) -> TokenBinding:
         """Extract tokens from request and identify embedded IDs."""
         tokens_found: List[Tuple[str, str]] = []
-        
+
         # 1. Authorization header
         auth = req_headers.get("authorization", "")
         if auth.lower().startswith("bearer "):
             token = auth[7:].strip()
             tokens_found.append(("header:authorization", token))
-        
+
         # 2. Cookies
         cookies = req_headers.get("cookie", "")
         for cookie in cookies.split(";"):
@@ -602,12 +694,12 @@ class TokenAnalyzer:
                 continue
             name, value = cookie.split("=", 1)
             name_lower = name.lower().strip()
-            
+
             if any(tn in name_lower for tn in Config.TOKEN_PARAM_NAMES):
                 tokens_found.append((f"cookie:{name}", value))
             elif self.JWT_PATTERN.search(value):
                 tokens_found.append((f"cookie:{name}", value))
-        
+
         # 3. URL query parameters
         if path and "?" in path:
             query = path.split("?", 1)[1]
@@ -617,12 +709,12 @@ class TokenAnalyzer:
                 name, value = param.split("=", 1)
                 name_lower = name.lower()
                 value = unquote(value)
-                
+
                 if any(tn in name_lower for tn in Config.TOKEN_PARAM_NAMES):
                     tokens_found.append((f"query:{name}", value))
                 elif self.JWT_PATTERN.search(value):
                     tokens_found.append((f"query:{name}", value))
-        
+
         # 4. Request body (for token in JSON)
         if body:
             try:
@@ -631,19 +723,19 @@ class TokenAnalyzer:
                     tokens_found.append(("body:jwt", match.group(0)))
             except Exception:
                 pass
-        
+
         self.detected_tokens[msg_id] = tokens_found
-        
+
         # Extract IDs from each token
         bound_ids: Set[str] = set()
         locations: List[str] = []
-        
+
         for location, token in tokens_found:
             extracted = self._extract_ids_from_token(token)
             if extracted:
                 locations.append(location)
                 bound_ids.update(extracted)
-        
+
         # Determine binding strength
         if not bound_ids:
             strength = "none"
@@ -653,53 +745,53 @@ class TokenAnalyzer:
             strength = "moderate"
         else:
             strength = "weak"
-        
+
         binding = TokenBinding(
             is_bound=bool(bound_ids),
             strength=strength,
             locations=locations,
             bound_ids=bound_ids
         )
-        
+
         self.token_bindings[msg_id] = binding
         return binding
-    
+
     def _extract_ids_from_token(self, token: str) -> Set[str]:
         """Attempt to decode token and extract ID-like values."""
         ids: Set[str] = set()
-        
+
         jwt_ids = self._decode_jwt_payload(token)
         if jwt_ids:
             ids.update(jwt_ids)
             return ids
-        
+
         for pattern in self.SIGNED_PAYLOAD_PATTERNS:
             if pattern.match(token):
                 decoded = self._try_base64_decode(token.split("--")[0])
                 if decoded:
                     ids.update(self._extract_ids_from_dict(decoded))
-        
+
         return ids
-    
+
     def _decode_jwt_payload(self, token: str) -> Optional[Set[str]]:
         """Decode JWT payload segment and extract IDs."""
         parts = token.split(".")
         if len(parts) != 3:
             return None
-        
+
         try:
             payload_b64 = parts[1]
             padding = 4 - len(payload_b64) % 4
             if padding != 4:
                 payload_b64 += "=" * padding
-            
+
             payload_bytes = base64.urlsafe_b64decode(payload_b64)
             payload = json.loads(payload_bytes.decode("utf-8"))
-            
+
             return self._extract_ids_from_dict(payload)
         except Exception:
             return None
-    
+
     def _try_base64_decode(self, value: str) -> Optional[dict]:
         """Try to base64 decode and parse as JSON."""
         for decoder in [base64.urlsafe_b64decode, base64.b64decode]:
@@ -710,15 +802,15 @@ class TokenAnalyzer:
             except Exception:
                 continue
         return None
-    
+
     def _extract_ids_from_dict(self, obj: Any, prefix: str = "") -> Set[str]:
         """Recursively extract ID-like values from decoded token payload."""
         ids: Set[str] = set()
-        
+
         if isinstance(obj, dict):
             for k, v in obj.items():
                 key_lower = k.lower()
-                
+
                 is_id_key = (
                     key_lower in {"id", "uid", "aid", "bid", "sub", "aud", "actid"} or
                     key_lower.endswith("_id") or
@@ -727,28 +819,28 @@ class TokenAnalyzer:
                     "user" in key_lower or
                     "org" in key_lower
                 )
-                
+
                 if is_id_key and isinstance(v, (str, int)):
                     str_val = str(v)
                     if is_likely_id_value(str_val):
                         ids.add(str_val)
-                
+
                 if isinstance(v, (dict, list)):
                     ids.update(self._extract_ids_from_dict(v, f"{prefix}{k}."))
-                    
+
         elif isinstance(obj, list):
             for item in obj:
                 ids.update(self._extract_ids_from_dict(item, prefix))
-        
+
         return ids
-    
+
     def get_binding_for_id(self, msg_id: int, id_value: str) -> TokenBinding:
         """Get token binding info for a specific ID in a message."""
         binding = self.token_bindings.get(msg_id)
-        
+
         if not binding or id_value not in binding.bound_ids:
             return TokenBinding()
-        
+
         return binding
 
 
@@ -759,17 +851,17 @@ class TokenAnalyzer:
 class IDORAnalyzer:
     """
     IDOR hypothesis generator with zero false negative guarantee.
-    
+
     Architecture:
     - EXTRACTION: Lossless, aggressive
-    - CLASSIFICATION: Metadata tagging, no filtering  
-    - SCORING: Bayesian ranking with explainable signals
+    - CLASSIFICATION: Metadata tagging, no filtering
+    - SCORING: Bayesian-ish ranking with explainable signals
     - OUTPUT: Ordered triage queue with "why" fields + co-occurrence
     """
-    
+
     def __init__(self, xml_path: str):
         self.xml_path = xml_path
-        
+
         # Core ID tracking
         # id_value -> key -> direction -> set(msg_id)
         self.id_index: Dict[str, Dict[str, Dict[str, Set[int]]]] = defaultdict(
@@ -780,32 +872,32 @@ class IDORAnalyzer:
         self.id_origin: Dict[str, str] = {}
         self.id_sources: Dict[str, Set[str]] = defaultdict(set)
         self.id_parse_confidence: Dict[str, str] = defaultdict(lambda: "high")
-        
+
         # Co-occurrence tracking
         self.id_cooccurrence: Dict[str, Set[str]] = defaultdict(set)
-        
+
         # Message metadata
         self.status_by_msg: Dict[int, int] = {}
         self.host_by_msg: Dict[int, str] = {}
         self.msg_endpoint: Dict[int, str] = {}
         self.host_priority_by_msg: Dict[int, str] = {}
         self.raw_messages: Dict[int, Dict[str, str]] = {}
-        
+
         # Host priority tracking
         self.endpoint_host_priority: Dict[str, str] = {}
-        
+
         # GraphQL tracking
         self.graphql_operations: Dict[str, List[int]] = defaultdict(list)
         self.msg_to_operation: Dict[int, str] = {}
         self.id_to_operations: Dict[str, Set[str]] = defaultdict(set)
-        
+
         # Token analysis
         self.token_analyzer = TokenAnalyzer()
         self.endpoint_token_coverage: Dict[str, Dict[str, TokenBinding]] = defaultdict(dict)
-        
+
         # Client-supplied ID tracking
         self.client_supplied_ids: Set[str] = set()
-    
+
     def analyze(self):
         """Run analysis on all HTTP messages."""
         for msg_id, raw_req, raw_resp in iter_http_messages(self.xml_path):
@@ -814,34 +906,34 @@ class IDORAnalyzer:
                 "response": raw_resp.decode(errors="replace"),
             }
             self._process(msg_id, raw_req, raw_resp)
-    
+
     def _process(self, msg_id: int, raw_req: bytes, raw_resp: bytes):
         """Process a single HTTP message pair."""
         req_line, req_headers, req_body = split_http_message(raw_req)
         resp_line, resp_headers, resp_body = split_http_message(raw_resp)
-        
+
         method, path = parse_request_line(req_line)
         host = (req_headers.get("host") or "").lower()
-        
+
         # Store metadata
         status = extract_status_code(raw_resp)
         if status is not None:
             self.status_by_msg[msg_id] = status
         self.host_by_msg[msg_id] = host
-        
+
         # Calculate and store endpoint + host priority
         ep = endpoint_from(method, host, path)
         host_priority = get_host_priority(host)
         self.msg_endpoint[msg_id] = ep
         self.host_priority_by_msg[msg_id] = host_priority
         self._set_endpoint_priority(ep, host_priority)
-        
+
         # Run token analysis BEFORE ID extraction
         self.token_analyzer.analyze_request(msg_id, req_headers, path or "", req_body)
-        
+
         # === REQUEST ID EXTRACTION ===
         request_ids: List[Tuple[str, str]] = []
-        
+
         if path:
             # URL query parameters
             for k, v in extract_url_params(path):
@@ -849,14 +941,14 @@ class IDORAnalyzer:
                 self.id_sources[v].add("query")
                 self._record(v, k, "request", msg_id, method, host, path)
                 request_ids.append((k, v))
-            
+
             # Path segments
             for k, v in extract_path_ids(path):
                 self._mark_client(v)
                 self.id_sources[v].add("path")
                 self._record(v, k, "request", msg_id, method, host, path)
                 request_ids.append((k, v))
-        
+
         # Request body JSON
         req_ct = req_headers.get("content-type", "")
         for obj, confidence in extract_json_objects_with_confidence(req_body, req_ct):
@@ -864,7 +956,7 @@ class IDORAnalyzer:
                 op = obj.get("operationName", "unknown")
                 self.graphql_operations[op].append(msg_id)
                 self.msg_to_operation[msg_id] = op
-                
+
                 # GraphQL variables (high signal)
                 vars_obj = obj.get("variables", {}) if isinstance(obj, dict) else {}
                 for k, v in walk_json_ids(vars_obj):
@@ -874,7 +966,7 @@ class IDORAnalyzer:
                     self.id_to_operations[v].add(op)
                     self._record(v, k, "request", msg_id, method, host, path)
                     request_ids.append((k, v))
-                
+
                 # Other GraphQL fields
                 payload = {k: v for k, v in obj.items() if k != "variables"} if isinstance(obj, dict) else {}
                 for k, v in walk_json_ids(payload):
@@ -887,11 +979,11 @@ class IDORAnalyzer:
                     self.id_sources[v].add("body")
                     self._record(v, k, "request", msg_id, method, host, path)
                     request_ids.append((k, v))
-        
+
         # === RESPONSE ID EXTRACTION ===
         response_ids: List[Tuple[str, str]] = []
         resp_ct = resp_headers.get("content-type", "")
-        
+
         for obj, confidence in extract_json_objects_with_confidence(resp_body, resp_ct):
             for k, v, parent in walk_json_with_context(obj):
                 self._mark_server(v)
@@ -899,53 +991,53 @@ class IDORAnalyzer:
                 self._record(v, k, "response", msg_id, method, host, path)
                 self.id_parse_confidence[v] = worsen_confidence(self.id_parse_confidence[v], confidence)
                 response_ids.append((k, v))
-                
+
                 # Structural co-occurrence
                 if parent and parent != v:
                     self.id_cooccurrence[f"structural:{parent}"].add(f"{k}:{v}")
-                
+
                 # Link to GraphQL operation
                 if msg_id in self.msg_to_operation:
                     self.id_to_operations[v].add(self.msg_to_operation[msg_id])
-        
+
         # === CO-OCCURRENCE TRACKING ===
         for rk, rv in request_ids:
             for sk, sv in response_ids:
                 if rv != sv and is_likely_id_value(sv):
                     self.id_cooccurrence[f"replay:{rk}:{rv}"].add(f"{sk}:{sv}")
-        
+
         # === TOKEN BINDING ANNOTATION ===
         self._annotate_token_bindings(msg_id, method, host, path)
-    
+
     def _set_endpoint_priority(self, ep: str, pri: str):
         """Keep the best known priority for an endpoint."""
         rank = {"primary": 3, "related": 2, "unknown": 1, "third_party": 0}
         cur = self.endpoint_host_priority.get(ep, "unknown")
         if rank.get(pri, 1) > rank.get(cur, 1):
             self.endpoint_host_priority[ep] = pri
-    
+
     def _mark_client(self, v: str):
         """Mark ID as client-originated."""
         if v not in self.id_origin:
             self.id_origin[v] = "client"
         elif self.id_origin[v] == "server":
             self.id_origin[v] = "both"
-    
+
     def _mark_server(self, v: str):
         """Mark ID as server-originated."""
         if v not in self.id_origin:
             self.id_origin[v] = "server"
         elif self.id_origin[v] == "client":
             self.id_origin[v] = "both"
-    
+
     def _record(
-        self, 
-        v: str, 
-        k: str, 
-        direction: str, 
-        msg_id: int, 
-        method: Optional[str], 
-        host: str, 
+        self,
+        v: str,
+        k: str,
+        direction: str,
+        msg_id: int,
+        method: Optional[str],
+        host: str,
         path: Optional[str]
     ):
         """Record an ID occurrence."""
@@ -957,40 +1049,41 @@ class IDORAnalyzer:
             k = ""
         if not isinstance(k, str):
             k = str(k)
-        
+
         self.id_index[v][k][direction].add(msg_id)
         self.id_timeline[v].append((msg_id, method or "?", host or "", path or "/"))
-    
+
     def _annotate_token_bindings(
-        self, 
-        msg_id: int, 
-        method: Optional[str], 
-        host: str, 
+        self,
+        msg_id: int,
+        method: Optional[str],
+        host: str,
         path: Optional[str]
     ):
         """Annotate discovered IDs with their token binding status."""
         if not path or not method:
             return
-        
+
         ep = endpoint_from(method, host, path)
-        
+
+        # NOTE: This is conservative but can be expensive; acceptable for offline triage.
         for v in self.id_timeline:
             if not any(m == msg_id for m, _, _, _ in self.id_timeline[v]):
                 continue
-            
+
             binding = self.token_analyzer.get_binding_for_id(msg_id, v)
-            
+
             if v not in self.endpoint_token_coverage[ep]:
                 self.endpoint_token_coverage[ep][v] = binding
             else:
                 existing = self.endpoint_token_coverage[ep][v]
                 if binding.is_bound and not existing.is_bound:
                     self.endpoint_token_coverage[ep][v] = binding
-    
+
     # ============================================================
     # DETECTION HELPERS
     # ============================================================
-    
+
     def has_dereference_pattern(self, id_value: str) -> Tuple[bool, int]:
         """
         Check if ID appears in both request and response (any key).
@@ -998,34 +1091,34 @@ class IDORAnalyzer:
         """
         req_msgs: Set[int] = set()
         resp_msgs: Set[int] = set()
-        
+
         for key in self.id_index.get(id_value, {}):
             req_msgs.update(self.id_index[id_value][key].get("request", set()))
             resp_msgs.update(self.id_index[id_value][key].get("response", set()))
-        
+
         coupled_msgs = req_msgs & resp_msgs
-        
+
         if coupled_msgs:
             max_body = 0
             for mid in coupled_msgs:
                 raw = self.raw_messages.get(mid, {})
                 max_body = max(max_body, len(raw.get("response", "")))
             return True, max_body
-        
+
         return False, 0
-    
+
     def is_selector_like(self, id_value: str) -> bool:
         """Check if ID appears in selector position (path/query/gql_var)."""
         sources = self.id_sources.get(id_value, set())
         return bool(sources & {"path", "query", "gql_var"})
-    
+
     def is_mutation_endpoint(self, endpoint: str) -> bool:
         """Check if endpoint is a mutation (write) endpoint."""
         if " " not in endpoint:
             return False
         method = endpoint.split()[0]
         return method in Config.MUTATION_METHODS
-    
+
     def has_mutation_operation(self, id_value: str) -> bool:
         """Check if ID is associated with mutation GraphQL operations."""
         ops = self.id_to_operations.get(id_value, set())
@@ -1034,7 +1127,158 @@ class IDORAnalyzer:
             if any(kw in op_lower for kw in Config.MUTATION_OP_KEYWORDS):
                 return True
         return False
-    
+
+    # ============================================================
+    # SEMANTIC TIERING (zero-FN: tier, not exclude)
+    # ============================================================
+
+    def is_pure_telemetry_id_strict(self, id_value: str, key: str) -> bool:
+        """
+        Ultra-conservative telemetry detection.
+        Returns True only if ALL conditions confirm telemetry nature.
+        """
+        key_lower = (key or "").lower()
+        if key_lower not in Config.PROBABLY_TELEMETRY_KEYS:
+            return False
+
+        timeline = self.id_timeline.get(id_value, [])
+        if not timeline:
+            return False
+
+        # 2. Must ONLY appear on KNOWN analytics hosts (exact match)
+        for _msg_id, _method, host, _path in timeline:
+            if (host or "").lower() not in Config.STRICT_ANALYTICS_HOSTS:
+                return False
+
+        # 3. Must ONLY appear on telemetry endpoint paths
+        for _msg_id, _method, _host, path in timeline:
+            base_path = extract_base_path(path).lower()
+            if not any(base_path.startswith(tp) or base_path == tp for tp in Config.STRICT_TELEMETRY_PATHS):
+                return False
+
+        # 4. Must NEVER be selector-like
+        if self.is_selector_like(id_value):
+            return False
+
+        # 5. Must never be in URL or gql_var
+        sources = self.id_sources.get(id_value, set())
+        if sources & {"path", "query", "gql_var"}:
+            return False
+
+        # 6. Must have NO structural co-occurrence with selector IDs
+        for cooc_key, vals in self.id_cooccurrence.items():
+            if f":{id_value}" in cooc_key or id_value in str(vals):
+                for v in vals:
+                    related_id = v.split(":")[-1] if ":" in v else v
+                    if self.is_selector_like(related_id):
+                        return False
+
+        # 7. Must NOT appear in replay patterns (as request source id)
+        for cooc_key in self.id_cooccurrence.keys():
+            if cooc_key.startswith("replay:") and id_value in cooc_key:
+                return False
+
+        # 8. Response must be empty/minimal
+        for msg_id, _method, _host, _path in timeline:
+            raw = self.raw_messages.get(msg_id, {})
+            resp = raw.get("response", "")
+            if "\r\n\r\n" in resp:
+                body = resp.split("\r\n\r\n", 1)[1]
+            elif "\n\n" in resp:
+                body = resp.split("\n\n", 1)[1]
+            else:
+                body = ""
+            body = body.strip()
+            if body and body not in ("{}", "[]", "", "ok", "1", "null"):
+                if len(body) > 100:
+                    return False
+
+        # 9. Value must be high entropy
+        if not _is_high_entropy_value(id_value):
+            return False
+
+        return True
+
+    def is_cryptographic_nonce(self, id_value: str, key: str) -> bool:
+        """Detect cryptographic nonces (single-use, high-entropy)."""
+        if (key or "").lower() not in Config.NONCE_KEYS:
+            return False
+
+        # Must appear exactly once
+        if len(self.id_timeline.get(id_value, [])) != 1:
+            return False
+
+        # Must be high entropy
+        if not _is_high_entropy_value(id_value):
+            return False
+
+        # Must not appear in co-occurrence patterns
+        for cooc_key in self.id_cooccurrence.keys():
+            if id_value in cooc_key or id_value in str(self.id_cooccurrence[cooc_key]):
+                return False
+
+        return True
+
+    def is_timestamp_value(self, id_value: str, key: str) -> bool:
+        """Detect timestamp values that cannot be authorization selectors."""
+        if (key or "").lower() not in Config.TIMESTAMP_KEYS:
+            return False
+
+        # Must not be selector-like
+        if self.is_selector_like(id_value):
+            return False
+
+        # Must be numeric
+        if not str(id_value).isdigit():
+            return False
+
+        # Must be in reasonable timestamp range
+        try:
+            val = int(id_value)
+            is_unix_seconds = 1000000000 <= val <= 2000000000
+            is_unix_millis = 1000000000000 <= val <= 2000000000000
+            return is_unix_seconds or is_unix_millis
+        except Exception:
+            return False
+
+    def is_token_internal_only(self, id_value: str) -> bool:
+        """
+        Check if ID appears ONLY inside tokens, never externally.
+        Semantic impossibility - cannot manipulate without forging.
+        """
+        token_bound_anywhere = any(
+            id_value in binding.bound_ids
+            for binding in self.token_analyzer.token_bindings.values()
+        )
+        if not token_bound_anywhere:
+            return False
+
+        sources = self.id_sources.get(id_value, set())
+        external_sources = {"path", "query", "gql_var", "body", "resp"}
+        if sources & external_sources:
+            return False
+
+        return True
+
+    def get_informational_reason(self, id_value: str, key: str) -> Tuple[bool, str]:
+        """
+        Check if candidate is informational (not authorization-relevant).
+        Returns: (is_informational, reason)
+        """
+        if self.is_pure_telemetry_id_strict(id_value, key):
+            return True, "telemetry"
+        if self.is_cryptographic_nonce(id_value, key):
+            return True, "nonce"
+        if self.is_timestamp_value(id_value, key):
+            return True, "timestamp"
+        if self.is_token_internal_only(id_value):
+            return True, "token-internal"
+        return False, ""
+
+    # ============================================================
+    # SCORING (ZERO FALSE NEGATIVE)
+    # ============================================================
+
     def _candidate_inclusion_ok(self, id_value: str, key: str) -> bool:
         """
         Zero-FN posture: broad inclusion.
@@ -1048,39 +1292,35 @@ class IDORAnalyzer:
         if self.is_selector_like(id_value):
             return True
         return False
-    
-    # ============================================================
-    # SCORING (ZERO FALSE NEGATIVE)
-    # ============================================================
-    
+
     def get_candidate_score(
-        self, 
-        id_value: str, 
-        key: str, 
+        self,
+        id_value: str,
+        key: str,
         endpoint: str,
         dir_set: Set[str]
     ) -> CandidateScore:
         """
         Calculate priority score for a candidate with explanations.
         Higher = more likely to be real IDOR.
-        
+
         CRITICAL: Score is for SORTING, not FILTERING.
         Minimum score is always 1 (zero false negative guarantee).
         """
         score = CandidateScore(total=50)
         k = (key or "").lower()
-        
+
         # === POSITIVE SIGNALS ===
-        
+
         # Host priority
         host_pri = self.endpoint_host_priority.get(endpoint, "unknown")
         if host_pri == "primary":
             score.adjust(+15, "primary target host")
         elif host_pri == "related":
-            pass  # Neutral
+            pass
         elif host_pri == "unknown":
             score.adjust(-10, "unknown host")
-        
+
         # Key semantics
         if k in Config.HIGH_SIGNAL_KEYS:
             score.adjust(+20, f"high-signal key: {key}")
@@ -1088,34 +1328,34 @@ class IDORAnalyzer:
             score.adjust(-20, f"low-signal key (telemetry): {key}")
         elif Config.KEY_REGEX.search(k):
             score.adjust(+5, "ID-like key pattern")
-        
+
         # Selector-like source (strongest signal)
         if self.is_selector_like(id_value):
             score.adjust(+30, "selector-like source (path/query/gql_var)")
         elif k == "id":
             score.adjust(-20, "generic 'id' without selector source")
-        
+
         # Dereference pattern
         is_deref, body_size = self.has_dereference_pattern(id_value)
         if is_deref:
             score.adjust(+15, "dereference pattern (request→response)")
             if body_size > 500:
                 score.adjust(+5, f"substantial response ({body_size} bytes)")
-        
+
         # Direction signals
         if "request" in dir_set and "response" in dir_set:
             score.adjust(+10, "appears in both directions")
         elif dir_set == {"response"}:
             score.adjust(+5, "response-only (potential data leak)")
-        
+
         # Mutation endpoint
         if self.is_mutation_endpoint(endpoint):
             score.adjust(+10, "mutation method (POST/PUT/DELETE/PATCH)")
-        
+
         # Mutation GraphQL operation
         if self.has_mutation_operation(id_value):
             score.adjust(+15, "mutation GraphQL operation")
-        
+
         # Origin
         origin = self.id_origin.get(id_value, "unknown")
         if origin == "client":
@@ -1124,36 +1364,36 @@ class IDORAnalyzer:
             score.adjust(+12, "appears in both directions (client+server)")
         elif origin == "server":
             score.adjust(+4, "server-originated only")
-        
+
         # Value likelihood
         if is_likely_id_value(str(id_value)):
             score.adjust(+10, "likely ID value format")
         else:
             score.adjust(-10, "unlikely ID value format")
-        
+
         # GraphQL operation linkage
         if self.id_to_operations.get(id_value):
             score.adjust(+5, "linked to GraphQL operations")
-        
+
         # Parse confidence
         conf = self.id_parse_confidence.get(id_value, "high")
         if conf == "high":
             score.adjust(+10, "high parse confidence")
         elif conf == "medium":
-            pass  # Neutral
+            pass
         elif conf == "low":
             score.adjust(-15, "low parse confidence")
-        
+
         # === NEGATIVE SIGNALS ===
-        
+
         # Third-party host
         if host_pri == "third_party":
             score.adjust(-30, "third-party host")
-        
+
         # Telemetry endpoint
         if endpoint_has_deprioritize_substring(endpoint):
             score.adjust(-25, "telemetry/analytics endpoint")
-        
+
         # Token binding
         binding = self.endpoint_token_coverage.get(endpoint, {}).get(id_value)
         if binding and binding.is_bound:
@@ -1163,29 +1403,29 @@ class IDORAnalyzer:
                 score.adjust(-15, f"token-bound (moderate: {', '.join(binding.locations)})")
             elif binding.strength == "weak":
                 score.adjust(-5, f"token-bound (weak: {', '.join(binding.locations)})")
-        
+
         return score
-    
+
     # ============================================================
     # CANDIDATE GENERATION
     # ============================================================
-    
+
     def get_candidates(self) -> List[IDCandidate]:
         """
         Build per-(id,key,endpoint) candidates and rank them.
         ALL candidates are returned, just in priority order.
         """
         bucket: Dict[Tuple[str, str, str], IDCandidate] = {}
-        
+
         for id_value, key_map in self.id_index.items():
             for key, dir_map in key_map.items():
                 if not self._candidate_inclusion_ok(id_value, key):
                     continue
-                
+
                 req_msgs = set(dir_map.get("request", set()))
                 resp_msgs = set(dir_map.get("response", set()))
                 all_msgs = req_msgs | resp_msgs
-                
+
                 # Expand to endpoint-scoped candidates
                 per_endpoint: Dict[str, Dict[str, Any]] = defaultdict(
                     lambda: {"req": set(), "resp": set(), "dirs": set()}
@@ -1198,20 +1438,23 @@ class IDORAnalyzer:
                     if mid in resp_msgs:
                         per_endpoint[ep]["resp"].add(mid)
                         per_endpoint[ep]["dirs"].add("response")
-                
+
                 for ep, info in per_endpoint.items():
                     dir_set = info["dirs"]
                     score_obj = self.get_candidate_score(id_value, key, ep, dir_set)
                     final_score = score_obj.finalize()
-                    
+
                     # Get token binding info
                     binding = self.endpoint_token_coverage.get(ep, {}).get(id_value)
-                    
+
                     # Get dereference info
                     is_deref, _ = self.has_dereference_pattern(id_value)
-                    
+
+                    # Tiering (semantic)
+                    is_info, info_reason = self.get_informational_reason(id_value, key)
+
                     directions = "+".join(sorted(dir_set)) if dir_set else "unknown"
-                    
+
                     candidate = IDCandidate(
                         id_value=id_value,
                         key=key,
@@ -1231,40 +1474,52 @@ class IDORAnalyzer:
                         directions=directions,
                         request_msgs=tuple(sorted(info["req"]))[:25],
                         response_msgs=tuple(sorted(info["resp"]))[:25],
+                        is_informational=is_info,
+                        informational_reason=info_reason,
                     )
                     bucket[(id_value, key, ep)] = candidate
-        
+
         # Rank by score descending, then by primary host, then by selector-like
         candidates = list(bucket.values())
         candidates.sort(
-            key=lambda c: (c.score, c.host_priority == "primary", "path" in c.sources or "query" in c.sources),
+            key=lambda c: (c.score, c.host_priority == "primary", ("path" in c.sources or "query" in c.sources or "gql_var" in c.sources)),
             reverse=True
         )
         return candidates
-    
+
+    def get_candidates_tiered(self) -> Tuple[List[IDCandidate], List[IDCandidate]]:
+        """
+        Return candidates in two tiers:
+        - Tier 1: Authorization-relevant (default view)
+        - Tier 2: Informational-only (telemetry, nonces, timestamps, token-internal claims)
+
+        ZERO INFORMATION LOSS - everything is still accessible.
+        """
+        all_candidates = self.get_candidates()
+        tier1 = [c for c in all_candidates if not c.is_informational]
+        tier2 = [c for c in all_candidates if c.is_informational]
+        return tier1, tier2
+
     def get_relevant_msg_ids(self, top_n: int = 200) -> List[int]:
-        """Collect msg_ids from top-N ranked candidates."""
-        candidates = self.get_candidates()
+        """Collect msg_ids from top-N ranked Tier 1 candidates."""
+        tier1, _tier2 = self.get_candidates_tiered()
         msg_ids: Set[int] = set()
-        for c in candidates[:top_n]:
+        for c in tier1[:top_n]:
             msg_ids.update(c.request_msgs)
             msg_ids.update(c.response_msgs)
         return sorted(msg_ids)
-
 
     def get_cooccurrence_keys_for_id(self, id_value: str) -> List[str]:
         """Get co-occurrence keys where this ID appears."""
         keys = []
         for k, vals in self.id_cooccurrence.items():
-            # Check if id_value is the parent/source
             if k.endswith(f":{id_value}") or k == f"structural:{id_value}":
                 keys.append(k)
-            # Check if id_value appears in the related set
             for v in vals:
                 if id_value in v:
                     keys.append(k)
                     break
-        return sorted(set(keys))[:10]  # Limit to 10
+        return sorted(set(keys))[:10]
 
     def get_candidates_for_msg(self, msg_id: int) -> List[IDCandidate]:
         """Get all candidates that involve a specific message."""
@@ -1279,12 +1534,12 @@ class IDORAnalyzer:
         result: Dict[str, Dict[str, Set[str]]] = defaultdict(
             lambda: {"request_only": set(), "response_only": set(), "bidirectional": set()}
         )
-        
+
         for id_value, key_map in self.id_index.items():
             for key, dir_map in key_map.items():
                 req_msgs = set(dir_map.get("request", set()))
                 resp_msgs = set(dir_map.get("response", set()))
-                
+
                 # Group by endpoint
                 per_ep: Dict[str, Dict[str, Set[int]]] = defaultdict(lambda: {"req": set(), "resp": set()})
                 for mid in req_msgs:
@@ -1293,11 +1548,11 @@ class IDORAnalyzer:
                 for mid in resp_msgs:
                     ep = self.msg_endpoint.get(mid, "?")
                     per_ep[ep]["resp"].add(mid)
-                
+
                 for ep, info in per_ep.items():
                     has_req = bool(info["req"])
                     has_resp = bool(info["resp"])
-                    
+
                     id_label = f"{key}={id_value}"
                     if has_req and has_resp:
                         result[ep]["bidirectional"].add(id_label)
@@ -1305,9 +1560,8 @@ class IDORAnalyzer:
                         result[ep]["request_only"].add(id_label)
                     elif has_resp:
                         result[ep]["response_only"].add(id_label)
-        
-        return result
 
+        return result
 
 
 # ============================================================
@@ -1318,23 +1572,23 @@ def print_graphql_summary(analyzer: IDORAnalyzer):
     """Print GraphQL operations summary."""
     if not analyzer.graphql_operations:
         return
-    
+
     print("\n" + "=" * 60)
     print("GRAPHQL OPERATIONS")
     print("=" * 60)
-    
+
     sorted_ops = sorted(
-        analyzer.graphql_operations.items(), 
-        key=lambda x: len(x[1]), 
+        analyzer.graphql_operations.items(),
+        key=lambda x: len(x[1]),
         reverse=True
     )
-    
+
     for op, msgs in sorted_ops[:30]:
         print(f"  {op}: {len(msgs)} calls")
-    
+
     if len(sorted_ops) > 30:
         print(f"  ... and {len(sorted_ops) - 30} more operations")
-    
+
     if analyzer.client_supplied_ids:
         print("\n  Client-supplied ID candidates:")
         for v in sorted(analyzer.client_supplied_ids)[:20]:
@@ -1344,19 +1598,23 @@ def print_graphql_summary(analyzer: IDORAnalyzer):
 
 
 def print_ranked_candidates(analyzer: IDORAnalyzer, limit: int = 50):
-    """Print candidates ranked by score with explanations."""
+    """Print candidates ranked by score with explanations (Tier 1 only)."""
     print("\n" + "=" * 60)
     print("RANKED IDOR CANDIDATES (HIGHEST PRIORITY FIRST)")
     print("=" * 60)
-    
-    candidates = analyzer.get_candidates()
-    
-    if not candidates:
-        print("(no candidates produced)")
+
+    tier1, tier2 = analyzer.get_candidates_tiered()
+
+    print(f"\nAuthorization-relevant (Tier 1): {len(tier1)}")
+    print(f"Informational (Tier 2): {len(tier2)}")
+
+    if not tier1:
+        print("(no authorization-relevant candidates produced)")
+        if tier2:
+            print(f"(but {len(tier2)} informational candidates exist - see triage report)")
         return
-    
-    for i, c in enumerate(candidates[:limit], 1):
-        # Build status indicators
+
+    for i, c in enumerate(tier1[:limit], 1):
         indicators = []
         if c.token_bound:
             indicators.append(f"TOKEN:{c.token_strength}")
@@ -1364,57 +1622,59 @@ def print_ranked_candidates(analyzer: IDORAnalyzer, limit: int = 50):
             indicators.append("MUTATION")
         if c.is_dereferenced:
             indicators.append("DEREF")
-        
+
         indicator_str = f" [{', '.join(indicators)}]" if indicators else ""
-        
+
         print(f"\n#{i:3d} [{c.score:3d}] {c.id_value}{indicator_str}")
         print(f"     key: {c.key}")
         print(f"     endpoint: {c.endpoint}")
         print(f"     origin: {c.origin} | sources: {', '.join(c.sources) or 'none'}")
         print(f"     host: {c.host_priority} | parse_conf: {c.parse_confidence} | dirs: {c.directions}")
-        
+
         if c.graphql_operations:
             print(f"     graphql_ops: {', '.join(c.graphql_operations[:5])}")
-        
+
         if c.token_locations:
             print(f"     token_at: {', '.join(c.token_locations)}")
-        
-        # Show score reasons
+
         if c.score_reasons:
             print(f"     scoring:")
             for reason in c.score_reasons[:7]:
                 print(f"       {reason}")
-        
+
         if c.request_msgs:
             print(f"     req_msgs: {', '.join(map(str, c.request_msgs[:10]))}")
         if c.response_msgs:
             print(f"     resp_msgs: {', '.join(map(str, c.response_msgs[:10]))}")
-    
-    if len(candidates) > limit:
-        print(f"\n... and {len(candidates) - limit} more candidates (see CSV export)")
-    
-    print(f"\nTotal candidates: {len(candidates)}")
+
+    if len(tier1) > limit:
+        print(f"\n... and {len(tier1) - limit} more Tier 1 candidates (see CSV export)")
+
+    print(f"\nTotal: {len(tier1)} authorization-relevant, {len(tier2)} informational")
 
 
 def print_endpoint_grouped(analyzer: IDORAnalyzer, limit_endpoints: int = 50):
-    """Print candidates grouped by endpoint."""
+    """Print Tier 1 candidates grouped by endpoint."""
     print("\n" + "=" * 60)
-    print("CANDIDATES BY ENDPOINT (TOP IDS BY SCORE)")
+    print("CANDIDATES BY ENDPOINT (TOP IDS BY SCORE) [TIER 1]")
     print("=" * 60)
-    
-    candidates = analyzer.get_candidates()
+
+    tier1, _tier2 = analyzer.get_candidates_tiered()
     grouped: Dict[str, List[IDCandidate]] = defaultdict(list)
-    
-    for c in candidates:
+
+    for c in tier1:
         grouped[c.endpoint].append(c)
-    
-    # Order endpoints by max score descending
+
+    if not grouped:
+        print("(no Tier 1 candidates)")
+        return
+
     eps = sorted(grouped.keys(), key=lambda ep: max(x.score for x in grouped[ep]), reverse=True)
-    
+
     for ep in eps[:limit_endpoints]:
         host_pri = analyzer.endpoint_host_priority.get(ep, "unknown")
         print(f"\n{ep}  [{host_pri}]")
-        
+
         top = sorted(grouped[ep], key=lambda x: x.score, reverse=True)[:10]
         for c in top:
             indicators = []
@@ -1425,9 +1685,9 @@ def print_endpoint_grouped(analyzer: IDORAnalyzer, limit_endpoints: int = 50):
             if c.is_dereferenced:
                 indicators.append("D")
             ind_str = f" [{','.join(indicators)}]" if indicators else ""
-            
+
             print(f"  - [{c.score:3d}]{ind_str} {c.id_value} (key={c.key}, origin={c.origin})")
-    
+
     if len(eps) > limit_endpoints:
         print(f"\n... and {len(eps) - limit_endpoints} more endpoints (see CSV export)")
 
@@ -1437,19 +1697,17 @@ def print_cooccurrence(analyzer: IDORAnalyzer, limit: int = 100):
     print("\n" + "=" * 60)
     print("ID CO-OCCURRENCE PATTERNS")
     print("=" * 60)
-    
+
     if not analyzer.id_cooccurrence:
         print("(no co-occurrence patterns detected)")
         return
-    
-    # Separate structural vs replay patterns
+
     structural = {k: v for k, v in analyzer.id_cooccurrence.items() if k.startswith("structural:")}
     replay = {k: v for k, v in analyzer.id_cooccurrence.items() if k.startswith("replay:")}
-    
+
     print(f"\nStructural patterns: {len(structural)}")
     print(f"Replay patterns: {len(replay)}")
-    
-    # Show top structural (by number of associated IDs)
+
     if structural:
         print("\n--- Structural (parent_id → child IDs) ---")
         sorted_structural = sorted(structural.items(), key=lambda x: len(x[1]), reverse=True)
@@ -1459,8 +1717,7 @@ def print_cooccurrence(analyzer: IDORAnalyzer, limit: int = 100):
             if len(vals) > 15:
                 vals_list.append(f"... (+{len(vals) - 15} more)")
             print(f"  {parent_id} → {vals_list}")
-    
-    # Show top replay (by number of response IDs)
+
     if replay:
         print("\n--- Replay (request_key:value → response IDs) ---")
         sorted_replay = sorted(replay.items(), key=lambda x: len(x[1]), reverse=True)
@@ -1470,42 +1727,42 @@ def print_cooccurrence(analyzer: IDORAnalyzer, limit: int = 100):
             if len(vals) > 15:
                 vals_list.append(f"... (+{len(vals) - 15} more)")
             print(f"  {req_info} → {vals_list}")
-    
+
     total = len(structural) + len(replay)
     if total > limit:
         print(f"\n... ({total - limit} more patterns)")
 
 
 def print_high_value_summary(analyzer: IDORAnalyzer):
-    """Print summary of highest-value targets."""
+    """Print summary of highest-value targets (Tier 1)."""
     print("\n" + "=" * 60)
-    print("HIGH-VALUE TARGETS SUMMARY")
+    print("HIGH-VALUE TARGETS SUMMARY [TIER 1]")
     print("=" * 60)
-    
-    candidates = analyzer.get_candidates()
-    
+
+    tier1, _tier2 = analyzer.get_candidates_tiered()
+
     # Mutations
-    mutations = [c for c in candidates if c.is_mutation]
+    mutations = [c for c in tier1 if c.is_mutation]
     print(f"\n  Mutation endpoints: {len(mutations)}")
     for c in mutations[:5]:
         print(f"    [{c.score}] {c.id_value} @ {c.endpoint}")
-    
+
     # Dereferenced IDs
-    derefs = [c for c in candidates if c.is_dereferenced]
+    derefs = [c for c in tier1 if c.is_dereferenced]
     print(f"\n  Dereferenced IDs: {len(derefs)}")
     for c in derefs[:5]:
         print(f"    [{c.score}] {c.id_value} @ {c.endpoint}")
-    
+
     # Client-controlled, high-scoring
-    client_high = [c for c in candidates if c.origin in ("client", "both") and c.score >= 70]
+    client_high = [c for c in tier1 if c.origin in ("client", "both") and c.score >= 70]
     print(f"\n  High-score client IDs (score >= 70): {len(client_high)}")
     for c in client_high[:5]:
         print(f"    [{c.score}] {c.id_value} @ {c.endpoint}")
-    
+
     # Non-token-bound, selector-like
     actionable = [
-        c for c in candidates 
-        if not c.token_bound 
+        c for c in tier1
+        if not c.token_bound
         and ("path" in c.sources or "query" in c.sources or "gql_var" in c.sources)
     ]
     print(f"\n  Selector-like, non-token-bound: {len(actionable)}")
@@ -1518,9 +1775,9 @@ def print_high_value_summary(analyzer: IDORAnalyzer):
 # ============================================================
 
 def export_ranked_csv(analyzer: IDORAnalyzer, out_path: str):
-    """Export all candidates with scores and metadata to CSV."""
+    """Export all candidates with scores and metadata to CSV (includes tiering)."""
     candidates = analyzer.get_candidates()
-    
+
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow([
@@ -1528,9 +1785,11 @@ def export_ranked_csv(analyzer: IDORAnalyzer, out_path: str):
             "origin", "sources", "host_priority", "parse_confidence",
             "token_bound", "token_strength", "token_locations",
             "is_dereferenced", "is_mutation", "directions",
-            "graphql_ops", "request_msgs", "response_msgs", "score_reasons", "cooccurrence_keys"
+            "graphql_ops", "request_msgs", "response_msgs",
+            "score_reasons", "cooccurrence_keys",
+            "is_informational", "informational_reason"
         ])
-        
+
         for rank, c in enumerate(candidates, 1):
             cooc_keys = analyzer.get_cooccurrence_keys_for_id(c.id_value)
             w.writerow([
@@ -1553,25 +1812,28 @@ def export_ranked_csv(analyzer: IDORAnalyzer, out_path: str):
                 "|".join(map(str, c.request_msgs)),
                 "|".join(map(str, c.response_msgs)),
                 "; ".join(c.score_reasons),
+                "|".join(cooc_keys),
+                c.is_informational,
+                c.informational_reason,
             ])
-    
+
     print(f"[+] Exported {len(candidates)} candidates to {out_path}")
 
 
 def export_relevant_transactions(analyzer: IDORAnalyzer, out_path: str, top_n: int = 200):
-    """Export raw HTTP transactions for relevant messages."""
+    """Export raw HTTP transactions for relevant messages (Tier 1 top-N)."""
     msg_ids = analyzer.get_relevant_msg_ids(top_n=top_n)
-    
+
     if not msg_ids:
         print(f"[-] No relevant transactions to export")
         return
-    
+
     with open(out_path, "w", encoding="utf-8") as f:
         for msg_id in msg_ids:
             raw = analyzer.raw_messages.get(msg_id)
             if not raw:
                 continue
-            
+
             f.write("=" * 80 + "\n")
             f.write(f"MSG ID: {msg_id}\n")
             f.write(f"STATUS: {analyzer.status_by_msg.get(msg_id, 'unknown')}\n")
@@ -1586,21 +1848,19 @@ def export_relevant_transactions(analyzer: IDORAnalyzer, out_path: str, top_n: i
             if len(resp) > 50000:
                 f.write(f"\n\n[TRUNCATED - {len(resp)} bytes total]")
 
-
-
-
-
             # Append analyzer metadata footer
             f.write("\n\n----- ANALYZER METADATA -----\n")
-            
-            # Get candidates for this message
+
             msg_candidates = analyzer.get_candidates_for_msg(msg_id)
-            
+
             if msg_candidates:
                 f.write(f"Candidate IDs ({len(msg_candidates)}):\n")
-                for c in msg_candidates[:20]:  # Limit display
-                    direction = "request+response" if msg_id in c.request_msgs and msg_id in c.response_msgs else \
-                                "request" if msg_id in c.request_msgs else "response"
+                for c in msg_candidates[:20]:
+                    direction = (
+                        "request+response" if msg_id in c.request_msgs and msg_id in c.response_msgs
+                        else "request" if msg_id in c.request_msgs
+                        else "response"
+                    )
                     flags = []
                     if c.is_mutation:
                         flags.append("M")
@@ -1608,14 +1868,16 @@ def export_relevant_transactions(analyzer: IDORAnalyzer, out_path: str, top_n: i
                         flags.append("T")
                     if c.is_dereferenced:
                         flags.append("D")
+                    if c.is_informational:
+                        flags.append(f"I:{c.informational_reason}")
                     flag_str = f" [{','.join(flags)}]" if flags else ""
                     f.write(f"  - {c.key}={c.id_value} ({direction}){flag_str} score={c.score}\n")
                 if len(msg_candidates) > 20:
                     f.write(f"  ... and {len(msg_candidates) - 20} more\n")
             else:
                 f.write("Candidate IDs: (none)\n")
-            
-            # Get co-occurrence patterns involving IDs in this message
+
+            # Co-occurrence patterns involving IDs in this message
             msg_cooc: Dict[str, Set[str]] = {"structural": set(), "replay": set()}
             for c in msg_candidates[:20]:
                 for k in analyzer.get_cooccurrence_keys_for_id(c.id_value):
@@ -1627,7 +1889,7 @@ def export_relevant_transactions(analyzer: IDORAnalyzer, out_path: str, top_n: i
                         vals = analyzer.id_cooccurrence.get(k, set())
                         for v in list(vals)[:5]:
                             msg_cooc["replay"].add(f"{k.replace('replay:', '')} → {v}")
-            
+
             if msg_cooc["structural"] or msg_cooc["replay"]:
                 f.write("Co-occurrence:\n")
                 if msg_cooc["structural"]:
@@ -1638,52 +1900,56 @@ def export_relevant_transactions(analyzer: IDORAnalyzer, out_path: str, top_n: i
                     f.write("  replay:\n")
                     for item in sorted(msg_cooc["replay"])[:10]:
                         f.write(f"    {item}\n")
-            
-            f.write("\n")
 
+            f.write("\n")
 
     print(f"[+] Exported {len(msg_ids)} transactions to {out_path}")
 
 
 def export_triage_report(analyzer: IDORAnalyzer, out_path: str):
-    """Export a human-readable triage report."""
+    """Export a human-readable triage report (Tier 1 + Tier 2 appendix)."""
     candidates = analyzer.get_candidates()
-    
+    tier1, tier2 = analyzer.get_candidates_tiered()
+
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("=" * 80 + "\n")
         f.write("IDOR TRIAGE REPORT\n")
         f.write("Generated by IDOR Analyzer (Zero False Negative Edition)\n")
-        f.write(f"Total candidates: {len(candidates)}\n")
+        f.write(f"Authorization-relevant (Tier 1): {len(tier1)}\n")
+        f.write(f"Informational (Tier 2): {len(tier2)}\n")
+        f.write(f"Total candidates (Tier 1 + Tier 2): {len(candidates)}\n")
         f.write("=" * 80 + "\n\n")
-        
+
         # Summary statistics
         f.write("SUMMARY STATISTICS\n")
         f.write("-" * 40 + "\n")
-        f.write(f"  Total candidates: {len(candidates)}\n")
+        f.write(f"  Authorization-relevant (Tier 1): {len(tier1)}\n")
+        f.write(f"  Informational (Tier 2): {len(tier2)}\n")
+        f.write(f"  Total candidates: {len(candidates)}\n\n")
         f.write(f"  Mutation endpoints: {sum(1 for c in candidates if c.is_mutation)}\n")
         f.write(f"  Dereferenced IDs: {sum(1 for c in candidates if c.is_dereferenced)}\n")
         f.write(f"  Token-bound: {sum(1 for c in candidates if c.token_bound)}\n")
         f.write(f"  Client-originated: {sum(1 for c in candidates if c.origin in ('client', 'both'))}\n")
-        f.write(f"  Score >= 80: {sum(1 for c in candidates if c.score >= 80)}\n")
-        f.write(f"  Score >= 60: {sum(1 for c in candidates if c.score >= 60)}\n")
+        f.write(f"  Tier 1 Score >= 80: {sum(1 for c in tier1 if c.score >= 80)}\n")
+        f.write(f"  Tier 1 Score >= 60: {sum(1 for c in tier1 if c.score >= 60)}\n")
         f.write("\n")
-        
-        # Score distribution
-        f.write("SCORE DISTRIBUTION\n")
+
+        # Score distribution (Tier 1)
+        f.write("TIER 1 SCORE DISTRIBUTION\n")
         f.write("-" * 40 + "\n")
         brackets = [(90, 999), (80, 89), (70, 79), (60, 69), (50, 59), (40, 49), (1, 39)]
         for low, high in brackets:
-            count = sum(1 for c in candidates if low <= c.score <= high)
+            count = sum(1 for c in tier1 if low <= c.score <= high)
             bar = "#" * min(count // 2, 50)
             label = f"{low:3d}+" if high > 100 else f"{low:3d}-{high:3d}"
             f.write(f"  {label}: {count:4d} {bar}\n")
         f.write("\n")
-        
-        # Top candidates detail
-        f.write("TOP 30 CANDIDATES (MANUAL REVIEW QUEUE)\n")
+
+        # Top candidates detail (Tier 1)
+        f.write("TOP 30 AUTHORIZATION-RELEVANT CANDIDATES (TIER 1)\n")
         f.write("-" * 40 + "\n\n")
-        
-        for i, c in enumerate(candidates[:30], 1):
+
+        for i, c in enumerate(tier1[:30], 1):
             indicators = []
             if c.token_bound:
                 indicators.append(f"TOKEN:{c.token_strength}")
@@ -1691,7 +1957,7 @@ def export_triage_report(analyzer: IDORAnalyzer, out_path: str):
                 indicators.append("MUTATION")
             if c.is_dereferenced:
                 indicators.append("DEREF")
-            
+
             f.write(f"{i:2d}. [{c.score:3d}] {c.id_value}\n")
             if indicators:
                 f.write(f"    Flags: {', '.join(indicators)}\n")
@@ -1708,27 +1974,26 @@ def export_triage_report(analyzer: IDORAnalyzer, out_path: str):
                 for reason in c.score_reasons[:7]:
                     f.write(f"      {reason}\n")
             f.write("\n")
-        
-        if len(candidates) > 30:
-            f.write(f"\n... and {len(candidates) - 30} more candidates in CSV export\n")
 
+        if len(tier1) > 30:
+            f.write(f"\n... and {len(tier1) - 30} more Tier 1 candidates in CSV export\n")
 
         # ============================================================
         # APPENDED SECTIONS (new data, preserves above structure)
         # ============================================================
-        
+
         # Co-occurrence summary
         f.write("\n\n")
         f.write("=" * 80 + "\n")
         f.write("CO-OCCURRENCE SUMMARY\n")
         f.write("=" * 80 + "\n\n")
-        
+
         structural = {k: v for k, v in analyzer.id_cooccurrence.items() if k.startswith("structural:")}
         replay = {k: v for k, v in analyzer.id_cooccurrence.items() if k.startswith("replay:")}
-        
+
         f.write(f"Structural patterns: {len(structural)}\n")
         f.write(f"Replay patterns: {len(replay)}\n\n")
-        
+
         if structural:
             f.write("--- Structural (parent_id → child IDs) ---\n\n")
             sorted_structural = sorted(structural.items(), key=lambda x: len(x[1]), reverse=True)
@@ -1742,7 +2007,7 @@ def export_triage_report(analyzer: IDORAnalyzer, out_path: str):
                 if count > 5:
                     f.write(f"    ... and {count - 5} more\n")
             f.write("\n")
-        
+
         if replay:
             f.write("--- Replay (request_key:value → response IDs) ---\n\n")
             sorted_replay = sorted(replay.items(), key=lambda x: len(x[1]), reverse=True)
@@ -1756,55 +2021,78 @@ def export_triage_report(analyzer: IDORAnalyzer, out_path: str):
                 if count > 5:
                     f.write(f"    ... and {count - 5} more\n")
             f.write("\n")
-        
+
         # Endpoint directionality
         f.write("\n")
         f.write("=" * 80 + "\n")
         f.write("ENDPOINT DIRECTIONALITY\n")
         f.write("=" * 80 + "\n\n")
-        
+
         directionality = analyzer.get_endpoint_directionality()
-        
-        # Sort by total ID count descending
         sorted_eps = sorted(
             directionality.items(),
             key=lambda x: len(x[1]["bidirectional"]) + len(x[1]["request_only"]) + len(x[1]["response_only"]),
             reverse=True
         )
-        
+
         for ep, dirs in sorted_eps[:40]:
             total = len(dirs["bidirectional"]) + len(dirs["request_only"]) + len(dirs["response_only"])
             if total == 0:
                 continue
-            
+
             host_pri = analyzer.endpoint_host_priority.get(ep, "unknown")
             f.write(f"{ep} [{host_pri}]\n")
-            
+
             if dirs["bidirectional"]:
                 bi_list = sorted(dirs["bidirectional"])[:10]
                 f.write(f"  bidirectional ({len(dirs['bidirectional'])}): {', '.join(bi_list)}")
                 if len(dirs["bidirectional"]) > 10:
                     f.write(f" ...")
                 f.write("\n")
-            
+
             if dirs["request_only"]:
                 req_list = sorted(dirs["request_only"])[:10]
                 f.write(f"  request-only ({len(dirs['request_only'])}): {', '.join(req_list)}")
                 if len(dirs["request_only"]) > 10:
                     f.write(f" ...")
                 f.write("\n")
-            
+
             if dirs["response_only"]:
                 resp_list = sorted(dirs["response_only"])[:10]
                 f.write(f"  response-only ({len(dirs['response_only'])}): {', '.join(resp_list)}")
                 if len(dirs["response_only"]) > 10:
                     f.write(f" ...")
                 f.write("\n")
-            
+
             f.write("\n")
-        
+
         if len(sorted_eps) > 40:
             f.write(f"... and {len(sorted_eps) - 40} more endpoints\n")
+
+        # ============================================================
+        # INFORMATIONAL CANDIDATES (TIER 2)
+        # ============================================================
+
+        f.write("\n\n")
+        f.write("=" * 80 + "\n")
+        f.write("INFORMATIONAL CANDIDATES (TIER 2 - EXCLUDED FROM MAIN TRIAGE)\n")
+        f.write("=" * 80 + "\n\n")
+
+        f.write("These are kept for completeness but are unlikely authorization-relevant.\n")
+        f.write("Reasons: telemetry, nonces, timestamps, token-internal claims.\n\n")
+
+        by_reason: Dict[str, List[IDCandidate]] = defaultdict(list)
+        for c in tier2:
+            by_reason[c.informational_reason or "unknown"].append(c)
+
+        for reason in sorted(by_reason.keys()):
+            items = by_reason[reason]
+            f.write(f"--- {reason.upper()} ({len(items)}) ---\n")
+            for c in items[:20]:
+                f.write(f"  [{c.score:3d}] {c.key}={c.id_value} @ {c.endpoint}\n")
+            if len(items) > 20:
+                f.write(f"  ... and {len(items) - 20} more\n")
+            f.write("\n")
 
     print(f"[+] Exported triage report to {out_path}")
 
@@ -1815,13 +2103,13 @@ def export_cooccurrence(analyzer: IDORAnalyzer, out_path: str):
         f.write("=" * 80 + "\n")
         f.write("ID CO-OCCURRENCE PATTERNS\n")
         f.write("=" * 80 + "\n\n")
-        
+
         structural = {k: v for k, v in analyzer.id_cooccurrence.items() if k.startswith("structural:")}
         replay = {k: v for k, v in analyzer.id_cooccurrence.items() if k.startswith("replay:")}
-        
+
         f.write(f"Structural patterns: {len(structural)}\n")
         f.write(f"Replay patterns: {len(replay)}\n\n")
-        
+
         if structural:
             f.write("--- STRUCTURAL (parent_id → child IDs) ---\n\n")
             for k in sorted(structural.keys()):
@@ -1833,7 +2121,7 @@ def export_cooccurrence(analyzer: IDORAnalyzer, out_path: str):
                 if len(vals) > 50:
                     f.write(f"  ... (+{len(vals) - 50} more)\n")
                 f.write("\n")
-        
+
         if replay:
             f.write("--- REPLAY (request_key:value → response IDs) ---\n\n")
             for k in sorted(replay.keys()):
@@ -1845,7 +2133,7 @@ def export_cooccurrence(analyzer: IDORAnalyzer, out_path: str):
                 if len(vals) > 50:
                     f.write(f"  ... (+{len(vals) - 50} more)\n")
                 f.write("\n")
-    
+
     print(f"[+] Exported co-occurrence patterns to {out_path}")
 
 
@@ -1866,47 +2154,50 @@ def main():
         print("  - Dereference detection (request→response coupling)")
         print("  - Co-occurrence visibility (structural + replay patterns)")
         print("  - Endpoint directionality mapping")
+        print("  - Two-tier output (authorization-relevant vs informational)")
+        print("  - Semantic noise reduction (telemetry, nonces, timestamps, token-internal)")
         print("")
         print("Outputs:")
-        print("  - <name>_idor_candidates.csv     : All candidates with scores + co-occurrence keys")
-        print("  - <name>_idor_transactions.txt   : HTTP transactions + per-message candidate metadata")
-        print("  - <name>_idor_triage.txt         : Triage report + co-occurrence + endpoint directionality")
+        print("  - <name>_idor_candidates.csv     : All candidates with scores + co-occurrence keys + tiering")
+        print("  - <name>_idor_transactions.txt   : HTTP transactions + per-message candidate metadata (Tier 1 top-N)")
+        print("  - <name>_idor_triage.txt         : Tiered triage report + co-occurrence + directionality + Tier 2 appendix")
         sys.exit(1)
 
     history_xml = sys.argv[1]
     base_name = Path(history_xml).stem
-    
+
     print(f"[*] Analyzing: {history_xml}")
     print(f"[*] Zero False Negative Mode: ENABLED")
-    print(f"[*] All candidates will be scored and ranked, none filtered")
+    print(f"[*] Two-tier output: authorization-relevant vs informational")
     print("")
-    
+
     analyzer = IDORAnalyzer(history_xml)
     analyzer.analyze()
-    
+
     # Print summaries
     print_graphql_summary(analyzer)
     print_ranked_candidates(analyzer, limit=50)
     print_endpoint_grouped(analyzer, limit_endpoints=30)
     print_cooccurrence(analyzer, limit=100)
     print_high_value_summary(analyzer)
-    
+
     # Export files
     csv_out = f"{base_name}_idor_candidates.csv"
     export_ranked_csv(analyzer, csv_out)
-    
+
     tx_out = f"{base_name}_idor_transactions.txt"
     export_relevant_transactions(analyzer, tx_out, top_n=200)
-    
+
     triage_out = f"{base_name}_idor_triage.txt"
     export_triage_report(analyzer, triage_out)
-    
-    cooc_out = f"{base_name}_idor_cooccurrence.txt"
-    export_cooccurrence(analyzer, cooc_out)
-    
+
     print("")
     print("[+] Analysis complete")
     print(f"[+] Review {triage_out} for manual triage queue")
+
+    tier1, tier2 = analyzer.get_candidates_tiered()
+    print(f"[+] Tier 1 (authorization-relevant): {len(tier1)}")
+    print(f"[+] Tier 2 (informational): {len(tier2)}")
 
 
 if __name__ == "__main__":
