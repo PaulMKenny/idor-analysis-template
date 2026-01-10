@@ -337,6 +337,33 @@ def run_permutator_from_session():
 
 
 # ==========================================================
+# CODIUM LAUNCHER
+# ==========================================================
+
+def open_in_codium():
+    """Open a saved box item in Codium."""
+    box = active_saved_box()
+    label = "PROJECT" if NAV_MODE == "project" else "SESSION"
+
+    if not box:
+        print(f"\n{label} saved box is empty.\n")
+        return
+
+    print(f"\n=== Open in Codium ({label}) ===")
+    for i, item in enumerate(box, 1):
+        print(f"[{i}] {item}")
+
+    try:
+        idx = int(input("\nSelect item to open: ").strip()) - 1
+        path = box[idx]
+        subprocess.run(["codium", str(path)], check=False)
+        print(f"\n[+] Opened: {path}\n")
+    except (ValueError, IndexError):
+        print("ERROR: Invalid selection.\n")
+    except FileNotFoundError:
+        print("ERROR: codium not found. Is it in PATH?\n")
+
+# ==========================================================
 # MENU
 # ==========================================================
 
@@ -347,19 +374,16 @@ def show_menu():
     if NAV_MODE == "session":
         print("1) Create new session")
         print("2) List sessions")
-
-    print("3) Browse tree & save path")
+        print("3) Browse tree & save path")
 
     if NAV_MODE == "session":
         print("4) Run IDOR analyzer")
         print("5) Dump raw HTTP history")
-
-    if NAV_MODE == "session":
-        print("6) Run IDOR permutator (single message)")
-
-    print("m) Toggle navigation mode (project / session)")
-    print("s) Show saved box")
-    print("q) Quit\n")
+        print("6) Run IDOR permutator (single message)")    
+        print("c) Open saved item in Codium")
+        print("m) Toggle navigation mode (project / session)")
+        print("s) Show saved box")
+        print("q) Quit\n")
 
 # ==========================================================
 # MAIN LOOP
@@ -389,11 +413,16 @@ while True:
             if NAV_MODE == "session":
                 run_permutator_from_session()
 
-        case "m" | "M":
-            toggle_mode()
+
         case "s" | "S":
             show_saved_box()
         
+        case "c" | "C":
+            open_in_codium()
+
+        case "m" | "M":
+            toggle_mode()
+    
         case "q" | "Q":
             print("Exiting.")
             sys.exit(0)
