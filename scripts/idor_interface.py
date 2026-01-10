@@ -374,16 +374,20 @@ def show_menu():
     if NAV_MODE == "session":
         print("1) Create new session")
         print("2) List sessions")
-        print("3) Browse tree & save path")
+
+    print("3) Browse tree & save path")
 
     if NAV_MODE == "session":
         print("4) Run IDOR analyzer")
         print("5) Dump raw HTTP history")
-        print("6) Run IDOR permutator (single message)")    
-        print("c) Open saved item in Codium")
-        print("m) Toggle navigation mode (project / session)")
-        print("s) Show saved box")
-        print("q) Quit\n")
+        print("6) Run IDOR permutator (single message)")
+
+    print("c) Open saved item in Codium")
+    print("m) Toggle navigation mode (project / session)")
+    print("s) Show saved box")
+    print("q) Quit\n")
+
+
 
 # ==========================================================
 # MAIN LOOP
