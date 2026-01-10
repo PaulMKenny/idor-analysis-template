@@ -560,13 +560,54 @@ def _get_placeholder_reason(candidate: IDCandidate) -> str:
 # CLI
 # ============================================================
 
-def format_output(mutations: List[StartLineMutation], verbose: bool = False) -> str:
-    """Format mutations for display."""
+def format_output(
+    mutations: List[StartLineMutation], 
+    method: str,
+    path: str,
+    candidate: IDCandidate,
+    verbose: bool = False
+) -> str:
+    """Format mutations for display with original request context."""
     lines = []
-    current_class = None
     
+    # === ORIGINAL REQUEST CONTEXT ===
+    lines.append("=" * 60)
+    lines.append("REQUEST CONTEXT")
+    lines.append("=" * 60)
+    lines.append("")
+    lines.append(f"Original request:")
+    lines.append(f"  {method} {path}")
+    lines.append("")
+    
+    # Build parameterized path
+    key_name = candidate.key
+    if not key_name.endswith("_id") and key_name != "id":
+        # Infer semantic name: "boards" -> "board_id"
+        if key_name.endswith("s"):
+            key_name = f"{key_name[:-1]}_id"
+        else:
+            key_name = f"{key_name}_id"
+    
+    parameterized_path = path.replace(candidate.id_value, "{" + key_name + "}")
+    
+    lines.append(f"Parameterized:")
+    lines.append(f"  {method} {parameterized_path}")
+    lines.append("")
+    lines.append(f"ID key:    {candidate.key}")
+    lines.append(f"ID value:  {candidate.id_value}")
+    lines.append(f"Origin:    {candidate.origin}")
+    lines.append(f"Sources:   {', '.join(candidate.sources)}")
+    if candidate.token_bound:
+        lines.append(f"Token:     BOUND ({candidate.token_strength})")
+    lines.append("")
+    
+    # === ANNOTATED LIST ===
+    lines.append("=" * 60)
+    lines.append("ANNOTATED PERMUTATIONS")
+    lines.append("=" * 60)
+    
+    current_class = None
     for i, m in enumerate(mutations, 1):
-        # Group header
         base_class = m.mutation_class.split(":")[0]
         if base_class != current_class:
             current_class = base_class
@@ -576,6 +617,16 @@ def format_output(mutations: List[StartLineMutation], verbose: bool = False) -> 
         lines.append(f"    {m.method} {m.path}")
         if verbose and m.note:
             lines.append(f"    Note: {m.note}")
+    
+    # === PLAIN LIST ===
+    lines.append("\n")
+    lines.append("=" * 60)
+    lines.append("PLAIN START-LINES (COPY-PASTE)")
+    lines.append("=" * 60)
+    lines.append("")
+    
+    for m in mutations:
+        lines.append(f"{m.method} {m.path}")
     
     return "\n".join(lines)
 
@@ -661,7 +712,7 @@ def main():
         print(f"Original: {method} {path}")
         print(f"Candidates: {len(selected)}")
         print(f"Total mutations: {len(all_mutations)}")
-        print(format_output(all_mutations, args.verbose))
+        print(format_output(all_mutations, method, path, selected[0], args.verbose))
         print()
 
 
