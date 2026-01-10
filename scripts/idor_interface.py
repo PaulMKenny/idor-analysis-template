@@ -286,7 +286,60 @@ def run_analyzers_from_session():
 
     print("[+] Analysis complete.\n")
 
+# Add to idor_interface.py
 
+def run_permutator_from_session():
+    """Run IDOR permutator on a specific message."""
+    if NAV_MODE != "session":
+        return
+
+    print("\n=== IDOR Start-Line Permutator ===\n")
+
+    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
+    if not sessions:
+        print("ERROR: No sessions available.\n")
+        return
+
+    session_root = sessions[-1]
+    output_dir = session_root / "output"
+
+    history = select_xml_from_session_input(session_root, "history")
+    if not history:
+        return
+
+    msg_id = input("Enter message ID: ").strip()
+    if not msg_id.isdigit():
+        print("ERROR: Message ID must be numeric.\n")
+        return
+
+    fmt = input("Output format [text/burp/json] (default: text): ").strip() or "text"
+    
+    out_file = output_dir / f"permutations_msg{msg_id}.txt"
+
+    result = subprocess.run(
+        [
+            "python3", SRC_DIR / "idor_permutator.py",
+            str(history), msg_id,
+            "--format", fmt,
+            "--verbose"
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    # Write to file
+    with open(out_file, "w") as f:
+        f.write(result.stdout)
+        if result.stderr:
+            f.write("\n=== STDERR ===\n")
+            f.write(result.stderr)
+
+    # Also print to console
+    print(result.stdout)
+    if result.stderr:
+        print(result.stderr)
+
+    print(f"\n[+] Saved to: {out_file}\n")
 
 
 # ==========================================================
@@ -306,6 +359,9 @@ def show_menu():
     if NAV_MODE == "session":
         print("4) Run IDOR analyzer")
         print("5) Dump raw HTTP history")
+
+    if NAV_MODE == "session":
+        print("6) Run IDOR permutator (single message)")
 
     print("m) Toggle navigation mode (project / session)")
     print("s) Show saved box")
@@ -335,10 +391,15 @@ while True:
             if NAV_MODE == "session":
                 dump_raw_http_from_session()
 
+        case "6":
+            if NAV_MODE == "session":
+                run_permutator_from_session()
+
         case "m" | "M":
             toggle_mode()
         case "s" | "S":
             show_saved_box()
+        
         case "q" | "Q":
             print("Exiting.")
             sys.exit(0)
