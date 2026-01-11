@@ -1,434 +1,287 @@
 #!/usr/bin/env python3
-import os
+"""
+IDOR START-LINE PERMUTATOR
+=========================
+
+Given:
+- Burp XML
+- Message ID
+- IDORAnalyzer metadata
+
+Produce:
+- Exhaustive, deterministic start-line permutations
+- Includes chained mutations as explicit state transitions
+- No heuristics
+- No filtering
+- No scoring
+- No request body/header replay (start-line only)
+
+Chaining model:
+- boundary(+1) → structural(double_slash_before)
+- Enumerated concretely and labeled algebraically
+- Default chain depth = 2 (overrideable)
+
+This script is downstream-only and read-only with respect to the analyzer.
+"""
+
 import sys
-import subprocess
-from pathlib import Path
+import re
+import argparse
+from dataclasses import dataclass
+from typing import List, Optional
 
-# ==========================================================
-# PROJECT ROOT BOOTSTRAP + LOCK
-# ==========================================================
-
-def find_or_create_project_root(start: Path) -> Path:
-    cur = start.resolve()
-    while cur != cur.parent:
-        if (cur / ".project_root").is_file():
-            return cur
-        cur = cur.parent
-
-    root = start.resolve()
-    (root / ".project_root").touch()
-    (root / "sessions").mkdir(exist_ok=True)
-
-    print("=== IDOR PROJECT INITIALIZED ===")
-    print(f"Root: {root}")
-    print("Created:")
-    print("  .project_root")
-    print("  sessions/")
-    print("===============================")
-    print()
-
-    return root
+from idor_analyzer import IDORAnalyzer, IDCandidate
 
 
-PROJECT_ROOT = find_or_create_project_root(Path.cwd())
-os.chdir(PROJECT_ROOT)
+# ============================================================
+# DATA MODELS
+# ============================================================
 
-SESSIONS_DIR = PROJECT_ROOT / "sessions"
-SRC_DIR = PROJECT_ROOT / "src"
-
-# ==========================================================
-# NAVIGATION MODE
-# ==========================================================
-
-NAV_MODE = "project"  # "project" | "session"
-
-def toggle_mode():
-    global NAV_MODE
-    NAV_MODE = "session" if NAV_MODE == "project" else "project"
-    print(f"\n[*] Switched to {NAV_MODE.upper()} mode\n")
-
-def browse_root() -> Path:
-    return PROJECT_ROOT if NAV_MODE == "project" else SESSIONS_DIR
-
-# ==========================================================
-# SAVED BOXES (UNCHANGED)
-# ==========================================================
-
-PROJECT_SAVED_BOX: list[Path] = []
-SESSION_SAVED_BOX: list[Path] = []
-
-def active_saved_box() -> list[Path]:
-    return PROJECT_SAVED_BOX if NAV_MODE == "project" else SESSION_SAVED_BOX
-
-def save(item: Path):
-    active_saved_box().append(item)
-
-def show_saved_box():
-    box = active_saved_box()
-    label = "PROJECT" if NAV_MODE == "project" else "SESSION"
-
-    print(f"\n=== {label} SAVED BOX ===")
-    if not box:
-        print("(empty)")
-    else:
-        for i, item in enumerate(box, 1):
-            print(f"[{i}] {item}")
-    print()
-
-# ==========================================================
-# SESSION MANAGEMENT
-# ==========================================================
-
-def create_session():
-    print("\n=== Create New Session ===")
-    idx = input("Enter session index (number): ").strip()
-
-    if not idx.isdigit():
-        print("ERROR: Session index must be numeric.\n")
-        return
-
-    session_name = f"session_{idx}"
-    session_root = SESSIONS_DIR / session_name
-    input_dir = session_root / "input"
-    output_dir = session_root / "output"
-
-    if session_root.exists():
-        print(f"ERROR: {session_name} already exists.\n")
-        return
-
-    input_dir.mkdir(parents=True)
-    output_dir.mkdir(parents=True)
-
-    history = input_dir / f"history_{idx}.xml"
-    sitemap = input_dir / f"sitemap_{idx}.xml"
-
-    history.touch()
-    sitemap.touch()
-
-    SESSION_SAVED_BOX.append(history)
-    SESSION_SAVED_BOX.append(sitemap)
-
-    print(f"\nSession created: {session_name}")
-    print("Input files:")
-    print(f"  - {history}")
-    print(f"  - {sitemap}")
-    print("Saved to SESSION saved box.\n")
-
-def list_sessions():
-    print("\n=== Existing Sessions ===\n")
-    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
-    if not sessions:
-        print("(none)\n")
-        return
-    for s in sessions:
-        print(f"- {s.name}")
-    print()
-
-# ==========================================================
-# TREE BROWSER (UNCHANGED)
-# ==========================================================
-
-def browse_tree_and_save():
-    root = browse_root()
-    label = "PROJECT" if NAV_MODE == "project" else "SESSION"
-
-    print(f"\n=== Browse {label} Tree ===")
-    print(f"(root = {root})\n")
-
-    def run_tree(cmd):
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        return result.stdout.splitlines()
-
-    try:
-        pretty = run_tree(["tree", "--noreport", str(root)])
-        absolute = run_tree(["tree", "-fi", "--noreport", str(root)])
-    except FileNotFoundError:
-        print("ERROR: 'tree' command not found.")
-        return
-
-    if not pretty or not absolute:
-        print("(empty tree)\n")
-        return
-
-    for i, line in enumerate(pretty, 1):
-        print(f"[{i}] {line}")
-
-    try:
-        idx = int(input("\nEnter number to save: ").strip()) - 1
-        path = Path(absolute[idx])
-        save(path)
-        print(f"\nSaved: {path}\n")
-    except Exception:
-        print("ERROR: Invalid selection.\n")
-
-# ==========================================================
-# 🔧 NEW ADDITION: SESSION-SCOPED XML SELECTION
-# ==========================================================
-
-def select_xml_from_session_input(session_root: Path, label: str) -> Path | None:
-    input_dir = session_root / "input"
-
-    if not input_dir.is_dir():
-        print("ERROR: Session input directory missing.\n")
-        return None
-
-    xmls = sorted(p for p in input_dir.iterdir() if p.is_file() and p.suffix == ".xml")
-
-    if not xmls:
-        print("ERROR: No XML files found in session input.\n")
-        return None
-
-    print(f"\n=== Select {label} XML ===")
-    for i, p in enumerate(xmls, 1):
-        print(f"[{i}] {p.name}")
-
-    try:
-        idx = int(input("> ").strip()) - 1
-        return xmls[idx]
-    except Exception:
-        print("ERROR: Invalid selection.\n")
-        return None
-
-# ==========================================================
-# NEW ADDITION: Raw transaction dump option
-# ==========================================================
+@dataclass
+class StartLineMutation:
+    method: str
+    path: str
+    mutation_class: str
+    note: str = ""
 
 
-def dump_raw_http_from_session():
-    if NAV_MODE != "session":
-        return
-
-    print("\n=== Dump Raw HTTP History (Session Mode) ===\n")
-
-    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
-    if not sessions:
-        print("ERROR: No sessions available.\n")
-        return
-
-    session_root = sessions[-1]  # most recent session
-    output_dir = session_root / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    history = select_xml_from_session_input(session_root, "history")
-    if not history:
-        return
-
-    raw_dump_file = output_dir / "raw_http_dump.txt"
-
-    with open(raw_dump_file, "w", encoding="utf-8") as f:
-        subprocess.run(
-            ["python3", SRC_DIR / "raw_http_dump.py", history],
-            stdout=f,
-            stderr=subprocess.DEVNULL,
-            check=True,
-        )
-
-    print("[+] Raw HTTP history written to:")
-    print(f"    {raw_dump_file}\n")
+@dataclass(frozen=True)
+class ChainStep:
+    class_name: str        # boundary / structural
+    label: str             # boundary(+1), structural(double_slash_before)
+    path: str              # resulting path
 
 
+# ============================================================
+# CONSTANTS
+# ============================================================
 
-def run_analyzers_from_session():
-    if NAV_MODE != "session":
-        return
+MAX_INT32 = "2147483647"
+MAX_INT64 = "9223372036854775807"
+MIN_INT32 = "-2147483648"
 
-    print("\n=== Run IDOR Analyzer (Session Mode) ===\n")
+BOUNDARY_OFFSETS = [1, -1]
+BOUNDARY_ABSOLUTE = ["0", "-1", MAX_INT32, MAX_INT64, MIN_INT32]
 
-    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
-    if not sessions:
-        print("ERROR: No sessions available.\n")
-        return
+STRUCTURAL_MUTATIONS = [
+    "trailing_slash",
+    "double_slash_before",
+    "double_slash_after",
+    "double_slash_wrap",
+    "dot_segment_before",
+    "dot_segment_after",
+]
 
-    session_root = sessions[-1]
-    output_dir = session_root / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
+PLACEHOLDER = "{DIFFERENT_VALID_ID}"
 
-    history = select_xml_from_session_input(session_root, "history")
-    sitemap = select_xml_from_session_input(session_root, "sitemap")
 
-    if not history or not sitemap:
-        return
+# ============================================================
+# ID TYPE DETECTION
+# ============================================================
 
-    result = subprocess.run(
-        ["python3", SRC_DIR / "idor_analyzer.py", history, sitemap],
-        cwd=output_dir,
-        text=True,
-        capture_output=True,
+def is_numeric_id(v: str) -> bool:
+    return v.isdigit() and len(v) >= 3
+
+
+def is_uuid(v: str) -> bool:
+    return bool(re.match(
+        r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$",
+        v, re.I))
+
+
+# ============================================================
+# POLICY
+# ============================================================
+
+def is_identity_key(key: str) -> bool:
+    return any(x in (key or "").lower()
+               for x in ("user", "account", "org", "tenant", "workspace",
+                         "owner", "creator", "author"))
+
+
+def requires_placeholder_only(c: IDCandidate) -> bool:
+    return (
+        c.token_bound or
+        c.origin == "server" or
+        is_identity_key(c.key) or
+        c.id_value.startswith(("gid://", "urn:", "uuid:", "oid:"))
     )
 
-    sitemap_tree = output_dir / "sitemap_tree.txt"
-    with open(sitemap_tree, "w", encoding="utf-8") as f:
-        subprocess.run(
-            ["python3", SRC_DIR / "sitemap_extractor.py", sitemap],
-            stdout=f,
-            check=True,
-        )
 
-    full_report = output_dir / "idor_full_analysis.txt"
-    with open(full_report, "w", encoding="utf-8") as out:
-        out.write("=== IDOR ANALYZER OUTPUT ===\n\n")
-        out.write(result.stdout)
-        if result.stderr:
-            out.write("\n=== STDERR ===\n")
-            out.write(result.stderr)
-        out.write("\n\n=== SITEMAP TREE ===\n")
-        out.write(sitemap_tree.read_text())
+# ============================================================
+# PATH HELPERS
+# ============================================================
 
-    print("[+] Analysis complete.\n")
+def replace_id(path: str, old: str, new: str) -> str:
+    if f"/{old}/" in path:
+        return path.replace(f"/{old}/", f"/{new}/", 1)
+    if path.endswith(f"/{old}"):
+        return path[:-len(old)] + new
+    return path.replace(old, new, 1)
 
 
-def run_permutator_from_session():
-    """Run IDOR permutator on a specific message."""
-    if NAV_MODE != "session":
+def apply_structural_mutation(path: str, idv: str, kind: str) -> Optional[str]:
+    if kind == "trailing_slash":
+        return path + "/" if not path.endswith("/") else None
+    if kind == "double_slash_before":
+        return path.replace(f"/{idv}", f"//{idv}", 1)
+    if kind == "double_slash_after":
+        return path.replace(f"/{idv}/", f"/{idv}//", 1)
+    if kind == "double_slash_wrap":
+        return path.replace(f"/{idv}/", f"//{idv}//", 1)
+    if kind == "dot_segment_after":
+        return path.replace(f"/{idv}/", f"/{idv}/./", 1)
+    if kind == "dot_segment_before":
+        return path.replace(f"/{idv}", f"/./{idv}", 1)
+    return None
+
+
+# ============================================================
+# PRIMITIVE STEP GENERATORS
+# ============================================================
+
+def boundary_steps(path: str, c: IDCandidate) -> List[ChainStep]:
+    out = []
+    if is_numeric_id(c.id_value):
+        base = int(c.id_value)
+        for o in BOUNDARY_OFFSETS:
+            nv = str(base + o)
+            out.append(ChainStep(
+                "boundary",
+                f"boundary({o:+d})",
+                replace_id(path, c.id_value, nv)
+            ))
+        for b in BOUNDARY_ABSOLUTE:
+            out.append(ChainStep(
+                "boundary",
+                f"boundary({b})",
+                replace_id(path, c.id_value, b)
+            ))
+    return out
+
+
+def structural_steps(path: str, c: IDCandidate) -> List[ChainStep]:
+    out = []
+    for k in STRUCTURAL_MUTATIONS:
+        m = apply_structural_mutation(path, c.id_value, k)
+        if m and m != path:
+            out.append(ChainStep(
+                "structural",
+                f"structural({k})",
+                m
+            ))
+    return out
+
+
+# ============================================================
+# CHAIN ENGINE (STATE TRANSITION GRAPH, DEPTH=2 DEFAULT)
+# ============================================================
+
+def generate_chain_mutations(
+    method: str,
+    path: str,
+    candidate: IDCandidate,
+    depth: int = 2
+) -> List[StartLineMutation]:
+
+    if depth < 2 or requires_placeholder_only(candidate):
+        return []
+
+    results: List[StartLineMutation] = []
+    seen = set()
+
+    first_steps = boundary_steps(path, candidate)
+
+    for s1 in first_steps:
+        second_steps = structural_steps(s1.path, candidate)
+        for s2 in second_steps:
+            label = f"{s1.label} → {s2.label}"
+            key = (method, s2.path)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append(StartLineMutation(
+                method=method,
+                path=s2.path,
+                mutation_class=f"chain:{s1.label}+{s2.label}",
+                note=label
+            ))
+
+    return results
+
+
+# ============================================================
+# FLAT MUTATION ENGINE (UNCHANGED)
+# ============================================================
+
+def generate_mutations(method: str, path: str, c: IDCandidate) -> List[StartLineMutation]:
+    if requires_placeholder_only(c):
+        return [StartLineMutation(
+            method,
+            replace_id(path, c.id_value, PLACEHOLDER),
+            "placeholder",
+            "manual cross-user test"
+        )]
+
+    out: List[StartLineMutation] = []
+
+    for s in boundary_steps(path, c):
+        out.append(StartLineMutation(
+            method,
+            s.path,
+            "boundary",
+            s.label
+        ))
+
+    for s in structural_steps(path, c):
+        out.append(StartLineMutation(
+            method,
+            s.path,
+            "structural",
+            s.label
+        ))
+
+    out.append(StartLineMutation(
+        method,
+        replace_id(path, c.id_value, PLACEHOLDER),
+        "placeholder",
+        "manual cross-user test"
+    ))
+
+    return out
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("xml")
+    ap.add_argument("msg_id", type=int)
+    ap.add_argument("--chain-depth", type=int, default=2)
+    args = ap.parse_args()
+
+    az = IDORAnalyzer(args.xml)
+    az.analyze()
+
+    req_line = az.raw_messages[args.msg_id]["request"].splitlines()[0]
+    method, path = req_line.split()[:2]
+
+    candidates = az.get_candidates_for_msg(args.msg_id)
+    if not candidates:
         return
 
-    print("\n=== IDOR Start-Line Permutator ===\n")
+    c = candidates[0]
 
-    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
-    if not sessions:
-        print("ERROR: No sessions available.\n")
-        return
+    flat = generate_mutations(method, path, c)
+    chained = generate_chain_mutations(method, path, c, args.chain_depth)
 
-    session_root = sessions[-1]
-    output_dir = session_root / "output"
-
-    history = select_xml_from_session_input(session_root, "history")
-    if not history:
-        return
-
-    msg_id = input("Enter message ID: ").strip()
-    if not msg_id.isdigit():
-        print("ERROR: Message ID must be numeric.\n")
-        return
-
-    fmt = input("Output format [text/burp/json] (default: text): ").strip() or "text"
-    
-    out_file = output_dir / f"permutations_msg{msg_id}.txt"
-
-    result = subprocess.run(
-        [
-            "python3", SRC_DIR / "idor_permutator.py",
-            str(history), msg_id,
-            "--format", fmt,
-            "--verbose"
-        ],
-        capture_output=True,
-        text=True,
-    )
-
-    # Write to file
-    with open(out_file, "w") as f:
-        f.write(result.stdout)
-        if result.stderr:
-            f.write("\n=== STDERR ===\n")
-            f.write(result.stderr)
-
-    # Also print to console
-    print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
-
-    print(f"\n[+] Saved to: {out_file}\n")
+    for m in flat + chained:
+        print(f"{m.method} {m.path}")
+        if m.note:
+            print(f"  # {m.note}")
 
 
-# ==========================================================
-# CODIUM LAUNCHER
-# ==========================================================
-
-def open_in_codium():
-    """Open a saved box item in Codium."""
-    box = active_saved_box()
-    label = "PROJECT" if NAV_MODE == "project" else "SESSION"
-
-    if not box:
-        print(f"\n{label} saved box is empty.\n")
-        return
-
-    print(f"\n=== Open in Codium ({label}) ===")
-    for i, item in enumerate(box, 1):
-        print(f"[{i}] {item}")
-
-    try:
-        idx = int(input("\nSelect item to open: ").strip()) - 1
-        path = box[idx]
-        subprocess.run(["codium", str(path)], check=False)
-        print(f"\n[+] Opened: {path}\n")
-    except (ValueError, IndexError):
-        print("ERROR: Invalid selection.\n")
-    except FileNotFoundError:
-        print("ERROR: codium not found. Is it in PATH?\n")
-
-# ==========================================================
-# MENU
-# ==========================================================
-
-def show_menu():
-    print(f"\n=== {PROJECT_ROOT.name} IDOR INTERFACE ===")
-    print(f"Mode: {NAV_MODE.upper()}\n")
-
-    if NAV_MODE == "session":
-        print("1) Create new session")
-        print("2) List sessions")
-
-    print("3) Browse tree & save path")
-
-    if NAV_MODE == "session":
-        print("4) Run IDOR analyzer")
-        print("5) Dump raw HTTP history")
-        print("6) Run IDOR permutator (single message)")
-
-    print("c) Open saved item in Codium")
-    print("m) Toggle navigation mode (project / session)")
-    print("s) Show saved box")
-    print("q) Quit\n")
-
-
-
-# ==========================================================
-# MAIN LOOP
-# ==========================================================
-
-while True:
-    show_menu()
-    choice = input("> ").strip()
-
-    match choice:
-        case "1":
-            if NAV_MODE == "session":
-                create_session()
-        case "2":
-            if NAV_MODE == "session":
-                list_sessions()
-        case "3":
-            browse_tree_and_save()
-        case "4":
-            if NAV_MODE == "session":
-                run_analyzers_from_session()
-        case "5":
-            if NAV_MODE == "session":
-                dump_raw_http_from_session()
-
-        case "6":
-            if NAV_MODE == "session":
-                run_permutator_from_session()
-
-
-        case "s" | "S":
-            show_saved_box()
-        
-        case "c" | "C":
-            open_in_codium()
-
-        case "m" | "M":
-            toggle_mode()
-    
-        case "q" | "Q":
-            print("Exiting.")
-            sys.exit(0)
-        case _:
-            print("Invalid option.\n")
+if __name__ == "__main__":
+    main()
