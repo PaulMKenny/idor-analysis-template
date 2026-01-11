@@ -4,6 +4,7 @@ import sys
 import subprocess
 from pathlib import Path
 
+
 # ==========================================================
 # PROJECT ROOT BOOTSTRAP + LOCK
 # ==========================================================
@@ -35,6 +36,11 @@ os.chdir(PROJECT_ROOT)
 
 SESSIONS_DIR = PROJECT_ROOT / "sessions"
 SRC_DIR = PROJECT_ROOT / "src"
+
+# Ensure src/ is importable
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 
 # ==========================================================
 # NAVIGATION MODE
