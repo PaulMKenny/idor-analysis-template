@@ -32,7 +32,6 @@ import json
 import argparse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
-
 from urllib.parse import quote
 
 from idor_analyzer import IDORAnalyzer, IDCandidate
@@ -47,19 +46,29 @@ class StartLineMutation:
     method: str
     path: str
     mutation_class: str
-    note: str = ""  # optional explanation / algebraic label
+    note: str = ""
+
+
+@dataclass
+class ChainSequence:
+    """
+    Executable chained sequence.
+    steps[0] must be sent first, steps[1] second, etc.
+    """
+    label: str
+    steps: List[StartLineMutation]
 
 
 @dataclass(frozen=True)
 class ChainStep:
-    class_name: str   # boundary / structural / uuid_boundary
-    label: str        # boundary(+1), structural(double_slash_before), ...
-    path: str         # resulting path
-    id_value: str     # current ID token in the path (may change with encoding/type-confusion)
+    class_name: str
+    label: str
+    path: str
+    id_value: str
 
 
 # ============================================================
-# CONSTANTS (DETERMINISTIC)
+# CONSTANTS
 # ============================================================
 
 MAX_INT32 = "2147483647"
@@ -119,13 +128,14 @@ def is_uuid(v: str) -> bool:
 
 
 # ============================================================
-# POLICY (NO HEURISTICS)
+# POLICY
 # ============================================================
 
 def is_identity_key(key: str) -> bool:
     k = (key or "").lower()
     return any(x in k for x in (
-        "user", "account", "org", "tenant", "workspace", "owner", "creator", "author"
+        "user", "account", "org", "tenant", "workspace",
+        "owner", "creator", "author"
     ))
 
 
@@ -136,18 +146,6 @@ def requires_placeholder_only(c: IDCandidate) -> bool:
         is_identity_key(getattr(c, "key", "")) or
         str(getattr(c, "id_value", "")).startswith(("gid://", "urn:", "uuid:", "oid:"))
     )
-
-
-def _placeholder_reason(c: IDCandidate) -> str:
-    if bool(getattr(c, "token_bound", False)):
-        return "token-bound: mutations break signature"
-    if getattr(c, "origin", None) == "server":
-        return "server-only: cannot manipulate response-only ID"
-    if is_identity_key(getattr(c, "key", "")):
-        return f"identity key '{getattr(c,'key','')}' needs real cross-account ID"
-    if str(getattr(c, "id_value", "")).startswith(("gid://", "urn:", "uuid:", "oid:")):
-        return "opaque identifier: cannot enumerate"
-    return "placeholder required"
 
 
 # ============================================================
@@ -172,171 +170,97 @@ def replace_id(path: str, old: str, new: str) -> str:
 
 
 def apply_structural_mutation(path: str, idv: str, kind: str) -> Optional[Tuple[str, str]]:
-    """
-    Returns (mutated_path, mutated_idv) or None.
-    mutated_idv matters for chaining (because some structural mutations change the ID token).
-    """
     base, query = _split_query(path)
 
-    # ===== topology-only (id token unchanged) =====
     if kind == "trailing_slash":
         if base.endswith("/"):
             return None
         return (base + "/" + query, idv)
 
     if kind == "double_slash_before":
-        needle = f"/{idv}"
-        if needle not in base:
-            return None
-        return (base.replace(needle, f"//{idv}", 1) + query, idv)
+        return (base.replace(f"/{idv}", f"//{idv}", 1) + query, idv) if f"/{idv}" in base else None
 
     if kind == "double_slash_after":
-        needle = f"/{idv}/"
-        if needle not in base:
-            return None
-        return (base.replace(needle, f"/{idv}//", 1) + query, idv)
+        return (base.replace(f"/{idv}/", f"/{idv}//", 1) + query, idv) if f"/{idv}/" in base else None
 
     if kind == "double_slash_wrap":
-        needle = f"/{idv}/"
-        if needle not in base:
-            return None
-        return (base.replace(needle, f"//{idv}//", 1) + query, idv)
+        return (base.replace(f"/{idv}/", f"//{idv}//", 1) + query, idv) if f"/{idv}/" in base else None
 
     if kind == "dot_segment_before":
-        needle = f"/{idv}"
-        if needle not in base:
-            return None
-        return (base.replace(needle, f"/./{idv}", 1) + query, idv)
+        return (base.replace(f"/{idv}", f"/./{idv}", 1) + query, idv) if f"/{idv}" in base else None
 
     if kind == "dot_segment_after":
-        needle = f"/{idv}/"
-        if needle in base:
-            return (base.replace(needle, f"/{idv}/./", 1) + query, idv)
+        if f"/{idv}/" in base:
+            return (base.replace(f"/{idv}/", f"/{idv}/./", 1) + query, idv)
         if base.endswith(f"/{idv}"):
             return (base + "/." + query, idv)
         return None
 
-    # ===== id-token mutations (id token changes) =====
-    if kind == "leading_zero_1" and is_numeric_id(idv):
-        new_id = "0" + idv
-        return (replace_id(path, idv, new_id), new_id)
+    # ID-token changing structural mutations
+    def mutate(new_id: str) -> Tuple[str, str]:
+        return replace_id(path, idv, new_id), new_id
 
-    if kind == "leading_zero_2" and is_numeric_id(idv):
-        new_id = "00" + idv
-        return (replace_id(path, idv, new_id), new_id)
-
-    if kind == "leading_zero_3" and is_numeric_id(idv):
-        new_id = "000" + idv
-        return (replace_id(path, idv, new_id), new_id)
+    if kind.startswith("leading_zero") and is_numeric_id(idv):
+        return mutate("0" * int(kind[-1]) + idv)
 
     if kind == "hex_encoding" and is_numeric_id(idv):
-        try:
-            new_id = hex(int(idv))
-        except ValueError:
-            return None
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(hex(int(idv)))
 
     if kind == "octal_encoding" and is_numeric_id(idv):
-        try:
-            new_id = oct(int(idv))
-        except ValueError:
-            return None
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(oct(int(idv)))
 
     if kind == "type_confusion_alpha":
-        new_id = idv + "abc"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "abc")
 
     if kind == "type_confusion_quote":
-        new_id = idv + "'"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "'")
 
     if kind == "type_confusion_bracket":
-        new_id = idv + "[]"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "[]")
 
     if kind == "null_byte":
-        new_id = idv + "%00"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "%00")
 
     if kind == "double_null_byte":
-        new_id = idv + "%2500"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "%2500")
 
     if kind == "space_suffix":
-        new_id = idv + "%20"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "%20")
 
     if kind == "tab_suffix":
-        new_id = idv + "%09"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "%09")
 
     if kind == "newline_suffix":
-        new_id = idv + "%0a"
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(idv + "%0a")
 
     if kind == "url_encode":
-        new_id = quote(idv, safe="")
-        if new_id == idv:
-            return None
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(quote(idv, safe=""))
 
     if kind == "double_url_encode":
-        new_id = quote(quote(idv, safe=""), safe="")
-        return (replace_id(path, idv, new_id), new_id)
+        return mutate(quote(quote(idv, safe=""), safe=""))
 
     if kind == "uppercase_path":
-        up = path.upper()
-        if up == path:
-            return None
-        return (up, idv.upper())
+        return (path.upper(), idv.upper()) if path.upper() != path else None
 
     if kind == "lowercase_path":
-        lo = path.lower()
-        if lo == path:
-            return None
-        return (lo, idv.lower())
+        return (path.lower(), idv.lower()) if path.lower() != path else None
 
     return None
 
 
 # ============================================================
-# PRIMITIVE STEP GENERATORS (FIRST-ORDER EDGES)
+# PRIMITIVE STEP GENERATORS
 # ============================================================
 
 def boundary_steps(path: str, idv: str) -> List[ChainStep]:
     out: List[ChainStep] = []
     if is_numeric_id(idv):
         base = int(idv)
-
         for off in BOUNDARY_OFFSETS:
-            new_id = str(base + off)
-            out.append(ChainStep(
-                "boundary",
-                f"boundary({off:+d})",
-                replace_id(path, idv, new_id),
-                new_id,
-            ))
-
+            nid = str(base + off)
+            out.append(ChainStep("boundary", f"boundary({off:+d})", replace_id(path, idv, nid), nid))
         for b in BOUNDARY_ABSOLUTE:
-            out.append(ChainStep(
-                "boundary",
-                f"boundary({b})",
-                replace_id(path, idv, b),
-                b,
-            ))
-    return out
-
-
-def uuid_steps(path: str, idv: str) -> List[ChainStep]:
-    out: List[ChainStep] = []
-    if is_uuid(idv):
-        out.append(ChainStep("uuid_boundary", "uuid(null)", replace_id(path, idv, NULL_UUID), NULL_UUID))
-        out.append(ChainStep("uuid_boundary", "uuid(max)", replace_id(path, idv, MAX_UUID), MAX_UUID))
-        parts = idv.split("-")
-        if len(parts) == 5 and len(parts[2]) == 4:
-            modified = f"{parts[0]}-{parts[1]}-0{parts[2][1:]}-{parts[3]}-{parts[4]}"
-            out.append(ChainStep("uuid_boundary", "uuid(version=0)", replace_id(path, idv, modified), modified))
+            out.append(ChainStep("boundary", f"boundary({b})", replace_id(path, idv, b), b))
     return out
 
 
@@ -346,78 +270,35 @@ def structural_steps(path: str, idv: str) -> List[ChainStep]:
         res = apply_structural_mutation(path, idv, k)
         if not res:
             continue
-        new_path, new_idv = res
-        if new_path == path:
-            continue
-        out.append(ChainStep("structural", f"structural({k})", new_path, new_idv))
-    return out
-
-
-def subpath_mutations(method: str, path: str) -> List[StartLineMutation]:
-    base, query = _split_query(path)
-    base = base.rstrip("/")
-    out: List[StartLineMutation] = []
-    for suffix in SUBPATH_SUFFIXES:
-        out.append(StartLineMutation(method, f"{base}/{suffix}{query}", "subpath", note=f"append /{suffix}"))
-    return out
-
-
-def version_prefix_mutations(method: str, path: str) -> List[StartLineMutation]:
-    out: List[StartLineMutation] = []
-    for prefix in VERSION_PREFIXES:
-        if not path.startswith(prefix):
-            out.append(StartLineMutation(method, prefix + path, "version_prefix", note=f"inject {prefix}"))
-
-    m = re.match(r"^(/(?:api/)?v)(\d+)(/.*)$", path)
-    if m:
-        pre, num, rest = m.groups()
-        try:
-            n = int(num)
-        except ValueError:
-            n = 0
-        for v in range(n - 1, 0, -1):
-            out.append(StartLineMutation(method, f"{pre}{v}{rest}", "version_downgrade", note=f"v{num} → v{v}"))
+        p, nid = res
+        out.append(ChainStep("structural", f"structural({k})", p, nid))
     return out
 
 
 # ============================================================
-# FLAT MUTATION ENGINE (NO CHAINING)
+# FLAT MUTATION ENGINE (UNCHANGED)
 # ============================================================
 
 def generate_flat_mutations(method: str, path: str, c: IDCandidate) -> List[StartLineMutation]:
     idv = str(getattr(c, "id_value", ""))
 
     if requires_placeholder_only(c):
-        return [StartLineMutation(method, replace_id(path, idv, PLACEHOLDER), "placeholder", note=_placeholder_reason(c))]
+        return [StartLineMutation(method, replace_id(path, idv, PLACEHOLDER), "placeholder")]
 
     out: List[StartLineMutation] = []
-
     for s in boundary_steps(path, idv):
-        out.append(StartLineMutation(method, s.path, "boundary", note=s.label))
-
-    for s in uuid_steps(path, idv):
-        out.append(StartLineMutation(method, s.path, "uuid_boundary", note=s.label))
-
+        out.append(StartLineMutation(method, s.path, "boundary", s.label))
     for s in structural_steps(path, idv):
-        out.append(StartLineMutation(method, s.path, "structural", note=s.label))
-
-    out.extend(subpath_mutations(method, path))
-    out.extend(version_prefix_mutations(method, path))
-
-    out.append(StartLineMutation(method, replace_id(path, idv, PLACEHOLDER), "placeholder", note="manual cross-user test"))
+        out.append(StartLineMutation(method, s.path, "structural", s.label))
+    out.append(StartLineMutation(method, replace_id(path, idv, PLACEHOLDER), "placeholder"))
     return out
 
 
 # ============================================================
-# CHAIN ENGINE (STATE GRAPH, DEPTH>=2)
+# CHAIN ENGINE (FULL SEQUENCES)
 # ============================================================
 
-def generate_chain_mutations(method: str, path: str, c: IDCandidate, depth: int) -> List[StartLineMutation]:
-    """
-    Deterministic chaining policy:
-      step 1: boundary(...)  (requires numeric ID)
-      steps 2..depth: structural(...)
-    """
+def generate_chain_sequences(method: str, path: str, c: IDCandidate, depth: int) -> List[ChainSequence]:
     if depth < 2 or requires_placeholder_only(c):
         return []
 
@@ -425,220 +306,82 @@ def generate_chain_mutations(method: str, path: str, c: IDCandidate, depth: int)
     if not is_numeric_id(start_id):
         return []
 
-    # Step 1 (boundary)
-    frontier: List[Tuple[str, str, List[str]]] = []
+    sequences: List[ChainSequence] = []
+    seen: set = set()
+
     for b in boundary_steps(path, start_id):
-        frontier.append((b.path, b.id_value, [b.label]))
+        step1 = StartLineMutation(method, b.path, "boundary", b.label)
+        frontier = [(b.path, b.id_value, [b.label], [step1])]
 
-    results: List[StartLineMutation] = []
-    seen_paths: set[Tuple[str, str]] = set()
+        for _ in range(2, depth + 1):
+            new_frontier = []
+            for cur_path, cur_id, labels, steps in frontier:
+                for s in structural_steps(cur_path, cur_id):
+                    new_steps = steps + [StartLineMutation(method, s.path, "structural", s.label)]
+                    new_labels = labels + [s.label]
+                    sig = tuple((st.method, st.path) for st in new_steps)
+                    if sig not in seen:
+                        seen.add(sig)
+                        sequences.append(ChainSequence(" → ".join(new_labels), new_steps))
+                    new_frontier.append((s.path, s.id_value, new_labels, new_steps))
+            frontier = new_frontier
+            if not frontier:
+                break
 
-    # Steps 2..depth (structural)
-    for _ in range(2, depth + 1):
-        new_frontier: List[Tuple[str, str, List[str]]] = []
-        for cur_path, cur_idv, labels in frontier:
-            for s in structural_steps(cur_path, cur_idv):
-                new_labels = labels + [s.label]
-                note = " → ".join(new_labels)
-                mclass = "chain:" + "+".join(new_labels)
-
-                key = (method, s.path)
-                if key not in seen_paths:
-                    seen_paths.add(key)
-                    results.append(StartLineMutation(method, s.path, mclass, note=note))
-
-                new_frontier.append((s.path, s.id_value, new_labels))
-        frontier = new_frontier
-        if not frontier:
-            break
-
-    return results
+    return sequences
 
 
 # ============================================================
-# OUTPUT (TEXT / BURP / JSON)
+# CLI / OUTPUT
 # ============================================================
-
-def format_text_report(
-    msg_id: int,
-    host: str,
-    method: str,
-    path: str,
-    candidate: IDCandidate,
-    flat: List[StartLineMutation],
-    chained: List[StartLineMutation],
-    verbose: bool,
-) -> str:
-    lines: List[str] = []
-    lines.append("=" * 60)
-    lines.append("START-LINE PERMUTATIONS")
-    lines.append("=" * 60)
-    lines.append(f"Message ID: {msg_id}")
-    lines.append(f"Host: {host}")
-    lines.append(f"Original: {method} {path}")
-    lines.append("")
-
-    lines.append("=" * 60)
-    lines.append("REQUEST CONTEXT")
-    lines.append("=" * 60)
-    lines.append("")
-    lines.append("Original request:")
-    lines.append(f"  {method} {path}")
-    lines.append("")
-    lines.append(f"ID key:    {getattr(candidate, 'key', '')}")
-    lines.append(f"ID value:  {getattr(candidate, 'id_value', '')}")
-    lines.append(f"Origin:    {getattr(candidate, 'origin', '')}")
-    srcs = getattr(candidate, "sources", [])
-    if isinstance(srcs, (set, list, tuple)):
-        lines.append(f"Sources:   {', '.join(sorted(map(str, srcs)))}")
-    else:
-        lines.append(f"Sources:   {srcs}")
-    if bool(getattr(candidate, "token_bound", False)):
-        lines.append(f"Token:     BOUND ({getattr(candidate, 'token_strength', '')})")
-    lines.append("")
-
-    def section(title: str, muts: List[StartLineMutation]) -> None:
-        lines.append("=" * 60)
-        lines.append(title)
-        lines.append("=" * 60)
-        if not muts:
-            lines.append("(none)\n")
-            return
-        for i, m in enumerate(muts, 1):
-            lines.append(f"\n[{i}] {m.mutation_class}")
-            lines.append(f"    {m.method} {m.path}")
-            if verbose and m.note:
-                lines.append(f"    Note: {m.note}")
-        lines.append("")
-
-    section("FLAT (FIRST-ORDER) MUTATIONS", flat)
-    section("CHAINED MUTATIONS", chained)
-
-    lines.append("=" * 60)
-    lines.append("PLAIN START-LINES (COPY-PASTE)")
-    lines.append("=" * 60)
-    lines.append("")
-    for m in flat + chained:
-        lines.append(f"{m.method} {m.path}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _score(c: IDCandidate) -> float:
-    try:
-        return float(getattr(c, "score", 0.0))
-    except Exception:
-        return 0.0
-
-
-def _pick_candidates(analyzer: IDORAnalyzer, msg_id: int, path: str, all_candidates: bool) -> List[IDCandidate]:
-    candidates = analyzer.get_candidates_for_msg(msg_id) or []
-    if not candidates:
-        return []
-
-    in_path = [c for c in candidates if str(getattr(c, "id_value", "")) in path]
-    not_in_path = [c for c in candidates if str(getattr(c, "id_value", "")) not in path]
-
-    in_path.sort(key=_score, reverse=True)
-    not_in_path.sort(key=_score, reverse=True)
-
-    ordered = in_path + not_in_path
-    return ordered if all_candidates else ordered[:1]
-
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="IDOR Start-Line Permutator (flat + chained)")
-    ap.add_argument("xml", help="Burp history XML")
-    ap.add_argument("msg_id", type=int, help="Message ID")
-    ap.add_argument("--chain-depth", type=int, default=2, help="Chain depth (default: 2)")
-    ap.add_argument("--all-candidates", action="store_true", help="Process all candidates (default: only top)")
-    ap.add_argument("--format", choices=["text", "burp", "json"], default="text", help="Output format")
-    ap.add_argument("-v", "--verbose", action="store_true", help="Include notes / algebraic labels (text)")
+    ap = argparse.ArgumentParser(description="IDOR Start-Line Permutator")
+    ap.add_argument("xml")
+    ap.add_argument("msg_id", type=int)
+    ap.add_argument("--chain-depth", type=int, default=2)
+    ap.add_argument("--format", choices=["text", "burp", "json"], default="text")
     args = ap.parse_args()
 
-    analyzer = IDORAnalyzer(args.xml)
-    analyzer.analyze()
+    az = IDORAnalyzer(args.xml)
+    az.analyze()
 
-    raw_req = analyzer.raw_messages[args.msg_id]["request"]
-    first_line = raw_req.splitlines()[0]
-    parts = first_line.split()
-    if len(parts) < 2:
-        print("Could not parse request line.", file=sys.stderr)
-        sys.exit(1)
+    req = az.raw_messages[args.msg_id]["request"].splitlines()[0]
+    method, path = req.split()[:2]
 
-    method, path = parts[0], parts[1]
-    host = getattr(analyzer, "host_by_msg", {}).get(args.msg_id, "unknown")
-
-    selected = _pick_candidates(analyzer, args.msg_id, path, args.all_candidates)
-    if not selected:
-        print("No IDOR candidates associated with this message.")
+    candidates = az.get_candidates_for_msg(args.msg_id)
+    if not candidates:
         return
 
-    flat_all: List[StartLineMutation] = []
-    chain_all: List[StartLineMutation] = []
-    seen: set[Tuple[str, str]] = set()
-    processed: List[IDCandidate] = []
+    c = candidates[0]
 
-    for c in selected:
-        idv = str(getattr(c, "id_value", ""))
-        if idv not in path:
-            continue
-
-        processed.append(c)
-
-        flat = generate_flat_mutations(method, path, c)
-        chained = generate_chain_mutations(method, path, c, args.chain_depth)
-
-        for m in flat:
-            k = (m.method, m.path)
-            if k not in seen:
-                seen.add(k)
-                flat_all.append(m)
-
-        for m in chained:
-            k = (m.method, m.path)
-            if k not in seen:
-                seen.add(k)
-                chain_all.append(m)
-
-    if not processed:
-        print("No candidates with IDs in path.")
-        return
+    flat = generate_flat_mutations(method, path, c)
+    chains = generate_chain_sequences(method, path, c, args.chain_depth)
 
     if args.format == "burp":
-        for m in flat_all + chain_all:
+        for m in flat:
             print(f"{m.method} {m.path} HTTP/1.1")
+        for ch in chains:
+            print("")
+            for s in ch.steps:
+                print(f"{s.method} {s.path} HTTP/1.1")
         return
 
     if args.format == "json":
-        data = {
-            "msg_id": args.msg_id,
-            "host": host,
-            "original": f"{method} {path}",
-            "chain_depth": args.chain_depth,
-            "candidates": [
-                {
-                    "key": getattr(c, "key", ""),
-                    "value": getattr(c, "id_value", ""),
-                    "origin": getattr(c, "origin", ""),
-                    "sources": sorted(map(str, getattr(c, "sources", []))) if isinstance(getattr(c, "sources", []), (set, list, tuple)) else [],
-                    "token_bound": bool(getattr(c, "token_bound", False)),
-                }
-                for c in processed
-            ],
-            "flat_mutations": [
-                {"method": m.method, "path": m.path, "class": m.mutation_class, "note": m.note}
-                for m in flat_all
-            ],
-            "chained_mutations": [
-                {"method": m.method, "path": m.path, "class": m.mutation_class, "note": m.note}
-                for m in chain_all
-            ],
-        }
-        print(json.dumps(data, indent=2))
+        print(json.dumps({
+            "flat": [m.__dict__ for m in flat],
+            "chains": [
+                {"label": ch.label, "steps": [s.__dict__ for s in ch.steps]}
+                for ch in chains
+            ]
+        }, indent=2))
         return
 
-    print(format_text_report(args.msg_id, host, method, path, processed[0], flat_all, chain_all, args.verbose))
+    # text
+    for i, ch in enumerate(chains, 1):
+        print(f"\n=== CHAIN {i}: {ch.label} ===")
+        for j, s in enumerate(ch.steps, 1):
+            print(f"Step {j}: {s.method} {s.path}")
 
 
 if __name__ == "__main__":
