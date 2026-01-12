@@ -34,9 +34,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import quote
 from itertools import combinations
-
-# Import analyzer (unchanged)
-from idor_analyzer import IDORAnalyzer, IDCandidate
+import json
+from pathlib import Path
 
 
 # ============================================================
@@ -121,6 +120,55 @@ MAX_UUID = "ffffffff-ffff-ffff-ffff-ffffffffffff"
 
 PLACEHOLDER = "{DIFFERENT_VALID_ID}"
 
+
+# ADD:
+
+@dataclass
+class CandidateInfo:
+    """Minimal candidate info loaded from JSON index."""
+    id_value: str
+    key: str
+    origin: str
+    sources: Tuple[str, ...]
+    token_bound: bool
+    token_strength: str
+    score: int
+    is_informational: bool = False
+
+
+def extract_path_ids(path: str) -> List[Tuple[str, str]]:
+    """Extract ID-like values from URL path segments."""
+    if not path:
+        return []
+    PATH_ID_RE = re.compile(r'^([0-9]+|[a-f0-9-]{8,}|[A-Za-z0-9_-]{16,})$', re.IGNORECASE)
+    base = path.split("?")[0]
+    parts = [p for p in base.split("/") if p]
+    out = []
+    for i, part in enumerate(parts):
+        if PATH_ID_RE.match(part):
+            key = parts[i - 1] if i > 0 else "<path>"
+            out.append((key, part))
+    return out
+
+
+def load_permutator_index(xml_path: str) -> dict:
+    """
+    Load permutator index JSON.
+    Looks for <basename>_permutator_index.json next to the XML.
+    """
+    xml_p = Path(xml_path)
+    index_path = xml_p.parent / f"{xml_p.stem}_permutator_index.json"
+    
+    if not index_path.exists():
+        # Also check in output dir (if running from session)
+        alt_path = xml_p.parent.parent / "output" / f"{xml_p.stem}_permutator_index.json"
+        if alt_path.exists():
+            index_path = alt_path
+        else:
+            return None
+    
+    with open(index_path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 # ============================================================
 # ID TYPE DETECTION
