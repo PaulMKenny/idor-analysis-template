@@ -215,7 +215,7 @@ def is_identity_key(key: str) -> bool:
     )
 
 
-def requires_placeholder_only(candidate: IDCandidate) -> bool:
+def requires_placeholder_only(candidate: CandidateInfo) -> bool:
     """
     Deterministic policy:
     If ANY of these are true → placeholder-only (no auto-mutation).
@@ -443,7 +443,7 @@ def apply_structural_mutation(
 def generate_mutations(
     method: str,
     path: str,
-    candidate: IDCandidate,
+    candidate: CandidateInfo,
     chain_depth: int = 1
 ) -> List[StartLineMutation]:
     """
@@ -696,7 +696,7 @@ def format_output(
     mutations: List[StartLineMutation], 
     method: str,
     path: str,
-    candidate: IDCandidate,
+    candidate: CandidateInfo,
     verbose: bool = False
 ) -> str:
     """Format mutations for display with original request context."""
