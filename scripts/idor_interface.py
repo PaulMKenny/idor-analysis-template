@@ -342,7 +342,7 @@ def run_permutator_from_session():
     print("\n[*] Generating single mutations...")
     
     cmd_single = [
-        "python3", str(SRC_DIR / "idor_permutator.py"),
+        "python3", "-u", str(SRC_DIR / "idor_permutator.py"),
         str(history), msg_id,
         "--format", fmt,
         "--chain-depth", "1",
@@ -374,7 +374,7 @@ def run_permutator_from_session():
         print(f"[*] Generating chained mutations (depth={chain_depth})...")
         
         cmd_chained = [
-            "python3", str(SRC_DIR / "idor_permutator.py"),
+            "python3", "-u", str(SRC_DIR / "idor_permutator.py"),
             str(history), msg_id,
             "--format", fmt,
             "--chain-depth", str(chain_depth),
