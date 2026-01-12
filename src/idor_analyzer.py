@@ -907,12 +907,23 @@ class IDORAnalyzer:
 
     def analyze(self):
         """Run analysis on all HTTP messages."""
+        # Count total for progress
+        print("[*] Counting messages...", end="", flush=True)
+        total = sum(1 for _ in ET.parse(self.xml_path).getroot().findall("item"))
+        print(f" {total} found")
+    
+        print("[*] Extracting IDs...")
         for msg_id, raw_req, raw_resp in iter_http_messages(self.xml_path):
+            if msg_id % 100 == 0:
+                print(f"\r    {msg_id}/{total} ({100*msg_id//total}%)", end="", flush=True)
+        
             self.raw_messages[msg_id] = {
                 "request": raw_req.decode(errors="replace"),
                 "response": raw_resp.decode(errors="replace"),
             }
             self._process(msg_id, raw_req, raw_resp)
+    
+        print(f"\r    {msg_id}/{total} (100%) - {len(self.id_index)} unique IDs")
 
     def _process(self, msg_id: int, raw_req: bytes, raw_resp: bytes):
         """Process a single HTTP message pair."""
