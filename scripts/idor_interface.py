@@ -256,12 +256,26 @@ def run_analyzers_from_session():
     if not history or not sitemap:
         return
 
-    result = subprocess.run(
-        ["python3", str(SRC_DIR / "idor_analyzer.py"), str(history), str(sitemap)],
+    process = subprocess.Popen(
+        ["python3", "-u", str(SRC_DIR / "idor_analyzer.py"), str(history), str(sitemap)],
         cwd=str(output_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
     )
+    stdout_lines = []
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        stdout_lines.append(line)
+    process.wait()
+    stderr_text = process.stderr.read()
+    if stderr_text:
+        print(stderr_text, file=sys.stderr)
+
+    class Result:
+        stdout = "".join(stdout_lines)
+        stderr = stderr_text
+    result = Result()
 
     sitemap_tree = output_dir / "sitemap_tree.txt"
     with open(sitemap_tree, "w", encoding="utf-8") as f:
@@ -336,21 +350,26 @@ def run_permutator_from_session():
     else:
         cmd += ["--chain-depth", "2"]
 
-    result = subprocess.run(
+    process = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
+    stdout_lines = []
+    for line in process.stdout:
+        print(line, end="", flush=True)
+        stdout_lines.append(line)
+    process.wait()
+    stderr_text = process.stderr.read()
+    if stderr_text:
+        print(stderr_text)
 
     with open(out_file, "w", encoding="utf-8") as f:
-        f.write(result.stdout)
-        if result.stderr:
+        f.write("".join(stdout_lines))
+        if stderr_text:
             f.write("\n=== STDERR ===\n")
-            f.write(result.stderr)
-
-    print(result.stdout)
-    if result.stderr:
-        print(result.stderr)
+            f.write(stderr_text)
 
     print(f"\n[+] Saved to: {out_file}\n")
 
