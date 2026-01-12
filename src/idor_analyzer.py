@@ -1076,10 +1076,12 @@ class IDORAnalyzer:
             if msg_id % 50 == 0:
                 if total:
                     pct = (msg_id * 100) // total
-                    print(f"\r    {msg_id}/{total} ({pct}%)", end="", flush=True)
+                    print(f"\r    processed msg_id={msg_id}  ({pct}% of {total})",
+                          end="", flush=True)
                 else:
-                    print(f"\r    {msg_id} messages", end="", flush=True)
-
+                    print(f"\r    processed msg_id={msg_id}",
+                          end="", flush=True)
+                    
             self.raw_messages[msg_id] = {
                 "request": raw_req.decode(errors="replace"),
                 "response": raw_resp.decode(errors="replace"),
@@ -1087,10 +1089,14 @@ class IDORAnalyzer:
 
             self._process(msg_id, raw_req, raw_resp)
 
-        if total:
-            print(f"\r    {processed}/{total} (100%)")
-        else:
-            print(f"\r    {processed} messages (done)")
+        # Final completion line (always print last msg_id)
+        if processed:
+            if total:
+                print(f"\r    completed msg_id={processed} ({total}/{total}, 100%)")
+            else:
+                print(f"\r    completed msg_id={processed}")
+
+        
 
         # --------------------------------------------------
         # Phase 2/3 — Extraction Summary
