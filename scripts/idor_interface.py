@@ -231,6 +231,84 @@ def dump_raw_http_from_session():
     print("[+] Raw HTTP history written to:")
     print(f"    {raw_dump_file}\n")
 
+
+# ==========================================================
+# REPEAT SESSION (COPY INPUTS)
+# ==========================================================
+
+def repeat_session():
+    """Copy inputs from existing session to create a new session for independent re-analysis."""
+    if NAV_MODE != "session":
+        return
+
+    print("\n=== Repeat Session (Copy Inputs) ===\n")
+
+    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
+    if not sessions:
+        print("ERROR: No sessions available to repeat.\n")
+        return
+
+    print("Select session to repeat:")
+    for i, s in enumerate(sessions, 1):
+        print(f"[{i}] {s.name}")
+
+    try:
+        idx = int(input("> ").strip()) - 1
+        source_session = sessions[idx]
+    except (ValueError, IndexError):
+        print("ERROR: Invalid selection.\n")
+        return
+
+    # Find next available session index
+    existing_indices = []
+    for s in sessions:
+        if s.name.startswith("session_"):
+            try:
+                existing_indices.append(int(s.name.split("_")[1]))
+            except (ValueError, IndexError):
+                pass
+    
+    new_idx = max(existing_indices, default=0) + 1
+    new_session_name = f"session_{new_idx}"
+    new_session_root = SESSIONS_DIR / new_session_name
+    new_input_dir = new_session_root / "input"
+    new_output_dir = new_session_root / "output"
+
+    # Create new session structure
+    new_input_dir.mkdir(parents=True)
+    new_output_dir.mkdir(parents=True)
+
+    # Copy input files
+    source_input_dir = source_session / "input"
+    if not source_input_dir.is_dir():
+        print(f"ERROR: Source session has no input directory.\n")
+        return
+
+    import shutil
+    copied_files = []
+    for f in source_input_dir.iterdir():
+        if f.is_file() and f.suffix == ".xml":
+            # Rename to new index
+            old_name = f.name
+            if old_name.startswith("history_"):
+                new_name = f"history_{new_idx}.xml"
+            elif old_name.startswith("sitemap_"):
+                new_name = f"sitemap_{new_idx}.xml"
+            else:
+                new_name = old_name
+            
+            dest = new_input_dir / new_name
+            shutil.copy2(f, dest)
+            copied_files.append((old_name, new_name))
+
+    print(f"\n[+] Created {new_session_name}")
+    print(f"[+] Copied {len(copied_files)} input files:")
+    for old, new in copied_files:
+        print(f"    {old} -> {new}")
+    print(f"\n[*] Ready to run analyzer on {new_session_name}\n")
+
+
+
 # ==========================================================
 # Run analyzer
 # ==========================================================
@@ -448,6 +526,7 @@ def show_menu():
         print("4) Run IDOR analyzer")
         print("5) Dump raw HTTP history")
         print("6) Run IDOR permutator (single message)")
+        print("7) Repeat session (copy inputs)")  # <-- ADD
 
     print("c) Open saved item in Codium")
     print("m) Toggle navigation mode (project / session)")
@@ -480,6 +559,11 @@ while True:
         case "6":
             if NAV_MODE == "session":
                 run_permutator_from_session()
+
+        case "7":
+            if NAV_MODE == "session":
+                repeat_session()
+    
         case "s" | "S":
             show_saved_box()
         case "c" | "C":
