@@ -237,7 +237,7 @@ def dump_raw_http_from_session():
 # ==========================================================
 
 def repeat_session():
-    """Copy inputs from existing session to create a new session for independent re-analysis."""
+    """Copy inputs from existing session to create a new run for independent re-analysis."""
     if NAV_MODE != "session":
         return
 
@@ -248,28 +248,34 @@ def repeat_session():
         print("ERROR: No sessions available to repeat.\n")
         return
 
+    # Show base sessions only (not runs)
+    base_sessions = [s for s in sessions if "-run_" not in s.name]
+    
     print("Select session to repeat:")
-    for i, s in enumerate(sessions, 1):
+    for i, s in enumerate(base_sessions, 1):
         print(f"[{i}] {s.name}")
 
     try:
         idx = int(input("> ").strip()) - 1
-        source_session = sessions[idx]
+        source_session = base_sessions[idx]
     except (ValueError, IndexError):
         print("ERROR: Invalid selection.\n")
         return
 
-    # Find next available session index
-    existing_indices = []
+    base_name = source_session.name  # e.g., "session_1"
+
+    # Find next available run number
+    existing_runs = [1]  # Original counts as run 1
     for s in sessions:
-        if s.name.startswith("session_"):
+        if s.name.startswith(f"{base_name}-run_"):
             try:
-                existing_indices.append(int(s.name.split("_")[1]))
+                run_num = int(s.name.split("-run_")[1])
+                existing_runs.append(run_num)
             except (ValueError, IndexError):
                 pass
     
-    new_idx = max(existing_indices, default=0) + 1
-    new_session_name = f"session_{new_idx}"
+    new_run = max(existing_runs) + 1
+    new_session_name = f"{base_name}-run_{new_run}"
     new_session_root = SESSIONS_DIR / new_session_name
     new_input_dir = new_session_root / "input"
     new_output_dir = new_session_root / "output"
@@ -278,7 +284,7 @@ def repeat_session():
     new_input_dir.mkdir(parents=True)
     new_output_dir.mkdir(parents=True)
 
-    # Copy input files
+    # Copy input files (keep original names - same session data)
     source_input_dir = source_session / "input"
     if not source_input_dir.is_dir():
         print(f"ERROR: Source session has no input directory.\n")
@@ -288,23 +294,14 @@ def repeat_session():
     copied_files = []
     for f in source_input_dir.iterdir():
         if f.is_file() and f.suffix == ".xml":
-            # Rename to new index
-            old_name = f.name
-            if old_name.startswith("history_"):
-                new_name = f"history_{new_idx}.xml"
-            elif old_name.startswith("sitemap_"):
-                new_name = f"sitemap_{new_idx}.xml"
-            else:
-                new_name = old_name
-            
-            dest = new_input_dir / new_name
+            dest = new_input_dir / f.name
             shutil.copy2(f, dest)
-            copied_files.append((old_name, new_name))
+            copied_files.append(f.name)
 
     print(f"\n[+] Created {new_session_name}")
-    print(f"[+] Copied {len(copied_files)} input files:")
-    for old, new in copied_files:
-        print(f"    {old} -> {new}")
+    print(f"[+] Copied {len(copied_files)} input files (unchanged):")
+    for name in copied_files:
+        print(f"    {name}")
     print(f"\n[*] Ready to run analyzer on {new_session_name}\n")
 
 
