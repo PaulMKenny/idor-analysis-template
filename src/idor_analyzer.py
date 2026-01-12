@@ -1011,6 +1011,7 @@ class IDORAnalyzer:
         - absolute XML path
         - file size
         - mtime
+        - analyzer code hash (auto-invalidate on logic changes)
         """
         p = Path(self.xml_path).resolve()
         try:
@@ -1018,7 +1019,14 @@ class IDORAnalyzer:
         except FileNotFoundError:
             return p.with_suffix(".idor.cache")
 
-        key = f"{p}:{stat.st_size}:{int(stat.st_mtime)}"
+        # Option A: include code hash so cache invalidates automatically when analyzer changes
+        try:
+            code_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:8]
+        except Exception:
+            # Fallback: if __file__ isn't readable for any reason, still keep cache functional
+            code_hash = "nocode"
+
+        key = f"{p}:{stat.st_size}:{int(stat.st_mtime)}:{code_hash}"
         digest = hashlib.sha256(key.encode()).hexdigest()[:16]
         return p.with_suffix(f".idor.{digest}.cache")
 
