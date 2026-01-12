@@ -906,6 +906,17 @@ class IDORAnalyzer:
         # PERFORMANCE FIX: Cache for candidates
         self._candidates_cache: Optional[List[IDCandidate]] = None
         self._candidates_by_msg: Optional[Dict[int, List[IDCandidate]]] = None
+        
+        # ==================================================
+        # DISK CACHE (XML-LEVEL, TRANSPARENT)
+        # ==================================================
+
+        self._cache_path = self._compute_cache_path()
+        self.analyzed = False
+
+
+
+
 
     def analyze(self):
         """Run analysis on all HTTP messages."""
