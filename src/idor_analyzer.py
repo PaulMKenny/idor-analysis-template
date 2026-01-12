@@ -2370,6 +2370,9 @@ def main():
 
     triage_out = f"{base_name}_idor_triage.txt"
     export_triage_report(analyzer, triage_out)
+    
+    perm_index_out = f"{base_name}_permutator_index.json"
+    export_permutator_index(analyzer, perm_index_out)
 
     print("")
     print("[+] Analysis complete")
