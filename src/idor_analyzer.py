@@ -2215,6 +2215,68 @@ def export_triage_report(analyzer: IDORAnalyzer, out_path: str):
     print(f"[+] Exported triage report to {out_path}")
 
 
+def export_permutator_index(analyzer: IDORAnalyzer, out_path: str):
+    """
+    Export minimal index for permutator (fast startup, no analyzer import needed).
+    
+    Contains only what permutator needs:
+    - request first line (method + path)
+    - host
+    - candidates with mutation-relevant fields
+    """
+    index: Dict[str, dict] = {}
+    
+    # Get all candidates once
+    all_candidates = analyzer.get_candidates()
+    
+    # Group candidates by message ID
+    candidates_by_msg: Dict[int, List[IDCandidate]] = defaultdict(list)
+    for c in all_candidates:
+        for msg_id in c.request_msgs:
+            candidates_by_msg[msg_id].append(c)
+        for msg_id in c.response_msgs:
+            if msg_id not in [m for m in c.request_msgs]:
+                candidates_by_msg[msg_id].append(c)
+    
+    # Build index
+    for msg_id, raw in analyzer.raw_messages.items():
+        req = raw.get("request", "")
+        first_line = req.split("\n")[0].strip() if req else ""
+        
+        # Skip if no request line
+        if not first_line or " " not in first_line:
+            continue
+        
+        msg_candidates = candidates_by_msg.get(msg_id, [])
+        
+        # Only include messages that have candidates
+        if not msg_candidates:
+            continue
+        
+        index[str(msg_id)] = {
+            "request_line": first_line,
+            "host": analyzer.host_by_msg.get(msg_id, ""),
+            "candidates": [
+                {
+                    "id_value": c.id_value,
+                    "key": c.key,
+                    "origin": c.origin,
+                    "sources": list(c.sources),
+                    "token_bound": c.token_bound,
+                    "token_strength": c.token_strength,
+                    "score": c.score,
+                    "is_informational": c.is_informational,
+                }
+                for c in sorted(msg_candidates, key=lambda x: x.score, reverse=True)
+            ]
+        }
+    
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(index, f, indent=2)
+    
+    print(f"[+] Exported permutator index ({len(index)} messages) to {out_path}")
+
+
 def export_cooccurrence(analyzer: IDORAnalyzer, out_path: str):
     """Export co-occurrence patterns to file."""
     with open(out_path, "w", encoding="utf-8") as f:
