@@ -1133,8 +1133,10 @@ class IDORAnalyzer:
         self.host_priority_by_msg[msg_id] = host_priority
         self._set_endpoint_priority(ep, host_priority)
 
-        # Run token analysis BEFORE ID extraction
-        self.token_analyzer.analyze_request(msg_id, req_headers, path or "", req_body)
+        # === PERFORMANCE GUARD: skip obvious non-application traffic early ===
+        req_text = raw_req[:400].lower()
+        if not any(x in req_text for x in (b"/", b"?", b"=", b"{", b"id")):
+            return
 
         # === REQUEST ID EXTRACTION ===
         request_ids: List[Tuple[str, str]] = []
@@ -1212,7 +1214,9 @@ class IDORAnalyzer:
                     self.id_cooccurrence[f"replay:{rk}:{rv}"].add(f"{sk}:{sv}")
 
         # === TOKEN BINDING ANNOTATION ===
-        self._annotate_token_bindings(msg_id, method, host, path)
+        if request_ids or response_ids:
+            self.token_analyzer.analyze_request(msg_id, req_headers, path or "", req_body)
+            self._annotate_token_bindings(msg_id, method, host, path)
 
     def _set_endpoint_priority(self, ep: str, pri: str):
         """Keep the best known priority for an endpoint."""
