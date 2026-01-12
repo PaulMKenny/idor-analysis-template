@@ -30,7 +30,7 @@ import sys
 import re
 import argparse
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import quote
 
 # Import analyzer (unchanged)
@@ -47,10 +47,6 @@ class StartLineMutation:
     path: str
     mutation_class: str
     note: str = ""  # Optional explanation
-
-    # For chained mutations: list of *paths* to send in order (step 1..N), excluding the original.
-    sequence: Optional[List[str]] = None
-
 
 
 # ============================================================
@@ -204,7 +200,7 @@ def requires_placeholder_only(candidate: IDCandidate) -> bool:
 # PATH MUTATION HELPERS
 # ============================================================
 
-def find_id_in_path(path: str, id_value: str) -> Optional[tuple]:
+def find_id_in_path(path: str, id_value: str) -> Optional[Tuple[int, int]]:
     """
     Find ID value position in path.
     Returns (start, end) indices or None.
@@ -252,12 +248,21 @@ def replace_id(path: str, old: str, new: str) -> str:
     return path.replace(old, new, 1)
 
 
-def apply_structural_mutation(path: str, id_value: str, kind: str) -> Optional[str]:
+def apply_structural_mutation(
+    path: str, 
+    id_value: str, 
+    kind: str, 
+    pos: Optional[Tuple[int, int]] = None
+) -> Optional[str]:
     """
     Apply a structural mutation to the path.
     Returns None if mutation not applicable.
+    
+    PERFORMANCE: pos parameter allows pre-computed position to be passed in.
     """
-    pos = find_id_in_path(path, id_value)
+    # PERFORMANCE FIX: Use pre-computed position if provided
+    if pos is None:
+        pos = find_id_in_path(path, id_value)
     if not pos:
         return None
     
@@ -418,6 +423,9 @@ def generate_mutations(
         )
         return out
 
+    # PERFORMANCE FIX: Compute position once for all structural mutations
+    pos = find_id_in_path(path, id_value)
+
     # === NUMERIC BOUNDARY MUTATIONS ===
     if is_numeric_id(id_value):
         base = int(id_value)
@@ -480,8 +488,9 @@ def generate_mutations(
             )
 
     # === STRUCTURAL PATH MUTATIONS ===
+    # PERFORMANCE FIX: Pass pre-computed position to avoid repeated lookups
     for kind in STRUCTURAL_MUTATIONS:
-        mutated = apply_structural_mutation(path, id_value, kind)
+        mutated = apply_structural_mutation(path, id_value, kind, pos)
         if mutated and mutated != path:
             out.append(
                 StartLineMutation(
@@ -545,138 +554,6 @@ def generate_mutations(
     )
 
     return out
-
-
-# ============================================================
-# CHAIN ENGINE (DEPTH>=2)
-# ============================================================
-
-def _next_id_token_for_structural(kind: str, idv: str) -> Optional[str]:
-    """Best-effort deterministic ID-token update for chaining."""
-    if kind == "leading_zero_1":
-        return "0" + idv
-    if kind == "leading_zero_2":
-        return "00" + idv
-    if kind == "leading_zero_3":
-        return "000" + idv
-
-    if kind == "hex_encoding":
-        try:
-            return hex(int(idv))
-        except Exception:
-            return None
-
-    if kind == "octal_encoding":
-        try:
-            return oct(int(idv))
-        except Exception:
-            return None
-
-    if kind == "type_confusion_alpha":
-        return idv + "abc"
-    if kind == "type_confusion_quote":
-        return idv + "'"
-    if kind == "type_confusion_bracket":
-        return idv + "[]"
-
-    if kind == "null_byte":
-        return idv + "%00"
-    if kind == "double_null_byte":
-        return idv + "%2500"
-    if kind == "space_suffix":
-        return idv + "%20"
-    if kind == "tab_suffix":
-        return idv + "%09"
-    if kind == "newline_suffix":
-        return idv + "%0a"
-
-    if kind == "url_encode":
-        enc = quote(idv, safe="")
-        return enc if enc != idv else None
-
-    if kind == "double_url_encode":
-        return quote(quote(idv, safe=""), safe="")
-
-    # topology-only / whole-path: ID token unchanged in a reliable way
-    return idv
-
-
-def generate_chain_mutations(
-    method: str,
-    path: str,
-    candidate: IDCandidate,
-    depth: int = 2,
-) -> List[StartLineMutation]:
-    """
-    Deterministic chaining policy (depth=2 default):
-      step 1: boundary(...)          (requires numeric ID in path)
-      steps 2..depth: structural(...) mutations applied sequentially
-
-    Output is a list of StartLineMutation where:
-      - .path is the final state path
-      - .sequence is the list of paths to send in order (step 1..N)
-    """
-    if depth < 2 or requires_placeholder_only(candidate):
-        return []
-
-    idv0 = str(getattr(candidate, "id_value", ""))
-    if not is_numeric_id(idv0):
-        return []
-
-    # step 1: boundary
-    frontier: List[Tuple[str, str, List[str], List[str]]] = []
-    base = int(idv0)
-
-    # offsets (±1)
-    for off in BOUNDARY_OFFSETS:
-        new_id = str(base + off)
-        p1 = replace_id(path, idv0, new_id)
-        frontier.append((p1, new_id, [f"boundary({off:+d})"], [p1]))
-
-    # absolute boundary values (may be non-numeric; that's fine)
-    for b in BOUNDARY_ABSOLUTE:
-        p1 = replace_id(path, idv0, b)
-        frontier.append((p1, b, [f"boundary({b})"], [p1]))
-
-    results: List[StartLineMutation] = []
-    seen_final: set = set()
-
-    # step 2..depth: structural chaining
-    for _ in range(2, depth + 1):
-        new_frontier: List[Tuple[str, str, List[str], List[str]]] = []
-
-        for cur_path, cur_idv, labels, seq in frontier:
-            for kind in STRUCTURAL_MUTATIONS:
-                mutated = apply_structural_mutation(cur_path, cur_idv, kind)
-                if not mutated or mutated == cur_path:
-                    continue
-
-                next_idv = _next_id_token_for_structural(kind, cur_idv) or cur_idv
-
-                new_labels = labels + [f"structural({kind})"]
-                note = " → ".join(new_labels)
-                mclass = "chain:" + "+".join(new_labels)
-                new_seq = seq + [mutated]
-
-                key = (method, mutated)
-                if key not in seen_final:
-                    seen_final.add(key)
-                    results.append(StartLineMutation(
-                        method=method,
-                        path=mutated,
-                        mutation_class=mclass,
-                        note=note,
-                        sequence=new_seq,
-                    ))
-
-                new_frontier.append((mutated, next_idv, new_labels, new_seq))
-
-        frontier = new_frontier
-        if not frontier:
-            break
-
-    return results
-
 
 
 def _get_placeholder_reason(candidate: IDCandidate) -> str:
@@ -750,11 +627,7 @@ def format_output(
             lines.append(f"\n=== {current_class.upper()} ===")
         
         lines.append(f"\n[{i}] {m.mutation_class}")
-        if m.sequence:
-            for j, p in enumerate(m.sequence, 1):
-                lines.append(f"    step {j}: {m.method} {p}")
-        else:
-            lines.append(f"    {m.method} {m.path}")
+        lines.append(f"    {m.method} {m.path}")
         if verbose and m.note:
             lines.append(f"    Note: {m.note}")
     
@@ -766,14 +639,7 @@ def format_output(
     lines.append("")
     
     for m in mutations:
-        if m.sequence:
-            if m.note:
-                lines.append(f"# {m.note}")
-            for p in m.sequence:
-                lines.append(f"{m.method} {p}")
-            lines.append("")
-        else:
-            lines.append(f"{m.method} {m.path}")
+        lines.append(f"{m.method} {m.path}")
     
     return "\n".join(lines)
 
@@ -782,7 +648,6 @@ def main():
     ap = argparse.ArgumentParser(description="IDOR Start-Line Permutator")
     ap.add_argument("xml", help="Burp history XML")
     ap.add_argument("msg_id", type=int, help="Message ID")
-    ap.add_argument("--chain-depth", type=int, default=2, help="Chain depth (default: 2)")
     ap.add_argument("-v", "--verbose", action="store_true", help="Show mutation notes")
     ap.add_argument("--all-candidates", action="store_true", 
                     help="Generate mutations for all candidates (not just top)")
@@ -850,9 +715,8 @@ def main():
         
         processed_candidates.append(candidate)
         mutations = generate_mutations(method, path, candidate)
-        chained = generate_chain_mutations(method, path, candidate, args.chain_depth)
         
-        for m in (mutations + chained):
+        for m in mutations:
             key = (m.method, m.path)
             if key not in seen:
                 seen.add(key)
@@ -867,11 +731,7 @@ def main():
     # Output
     if args.format == "burp":
         for m in all_mutations:
-            if m.sequence:
-                for p in m.sequence:
-                    print(f"{m.method} {p} HTTP/1.1")
-            else:
-                print(f"{m.method} {m.path} HTTP/1.1")
+            print(f"{m.method} {m.path} HTTP/1.1")
     
     elif args.format == "json":
         import json
@@ -889,14 +749,12 @@ def main():
                 }
                 for c in processed_candidates
             ],
-            "chain_depth": args.chain_depth,
             "mutations": [
                 {
                     "method": m.method,
                     "path": m.path,
                     "class": m.mutation_class,
                     "note": m.note,
-                    "sequence": (m.sequence or []),
                 }
                 for m in all_mutations
             ]
