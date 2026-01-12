@@ -320,11 +320,15 @@ def decode_http(elem) -> bytes:
 
 
 def iter_http_messages(xml_path: str):
-    """Iterate over HTTP messages in Burp XML export."""
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-    for idx, item in enumerate(root.findall("item"), start=1):
-        yield idx, decode_http(item.find("request")), decode_http(item.find("response"))
+    """Iterate over HTTP messages in a Burp XML export (streaming, low-memory)."""
+    idx = 0
+    # Streaming parse: avoids ET.parse(root.findall(...)) holding the entire XML tree in memory.
+    for event, elem in ET.iterparse(xml_path, events=("end",)):
+        if elem.tag != "item":
+            continue
+        idx += 1
+        yield idx, decode_http(elem.find("request")), decode_http(elem.find("response"))
+        elem.clear()
 
 
 def split_http_message(raw: bytes) -> Tuple[str, Dict[str, str], bytes]:
@@ -869,6 +873,7 @@ class IDORAnalyzer:
         )
         # id_value -> list[(msg_id, method, host, path)]
         self.id_timeline: Dict[str, List[Tuple[int, str, str, str]]] = defaultdict(list)
+        self.msg_id_pairs: Dict[int, Set[Tuple[str, str]]] = defaultdict(set)  # msg_id -> set[(id_value, key)]
         self.id_origin: Dict[str, str] = {}
         self.id_sources: Dict[str, Set[str]] = defaultdict(set)
         self.id_parse_confidence: Dict[str, str] = defaultdict(lambda: "high")
@@ -1050,6 +1055,8 @@ class IDORAnalyzer:
         if not isinstance(k, str):
             k = str(k)
 
+        self.msg_id_pairs[msg_id].add((v, k))
+
         self.id_index[v][k][direction].add(msg_id)
         self.id_timeline[v].append((msg_id, method or "?", host or "", path or "/"))
 
@@ -1067,17 +1074,26 @@ class IDORAnalyzer:
         ep = endpoint_from(method, host, path)
 
         # NOTE: This is conservative but can be expensive; acceptable for offline triage.
-        for v in self.id_timeline:
-            if not any(m == msg_id for m, _, _, _ in self.id_timeline[v]):
-                continue
+        # Fast-path: only consider IDs we actually saw in this message.
+        # (Same semantics as the scan, but without O(all_ids * all_msgs) work.)
+        ids_in_msg = {v for (v, _k) in self.msg_id_pairs.get(msg_id, set())}
+        if not ids_in_msg:
+            return
 
+        ep = endpoint_from(method, host, path)
+        if ep not in self.endpoint_token_coverage:
+            self.endpoint_token_coverage[ep] = {}
+
+        for v in ids_in_msg:
             binding = self.token_analyzer.get_binding_for_id(msg_id, v)
+            if not binding:
+                continue
 
             if v not in self.endpoint_token_coverage[ep]:
                 self.endpoint_token_coverage[ep][v] = binding
             else:
                 existing = self.endpoint_token_coverage[ep][v]
-                if binding.is_bound and not existing.is_bound:
+                if (not existing.is_bound) and binding.is_bound:
                     self.endpoint_token_coverage[ep][v] = binding
 
     # ============================================================
@@ -1522,9 +1538,84 @@ class IDORAnalyzer:
         return sorted(set(keys))[:10]
 
     def get_candidates_for_msg(self, msg_id: int) -> List[IDCandidate]:
-        """Get all candidates that involve a specific message."""
-        candidates = self.get_candidates()
-        return [c for c in candidates if msg_id in c.request_msgs or msg_id in c.response_msgs]
+        """Get candidates that involve a specific message (fast, no global candidate build).
+
+        This is equivalent to filtering get_candidates() by msg_id, but avoids:
+          - building the full global candidate list
+          - false negatives from request_msgs/response_msgs preview truncation
+        """
+        endpoint = self.msg_endpoint.get(msg_id)
+        if not endpoint:
+            return []
+
+        pairs = self.msg_id_pairs.get(msg_id, set())
+        if not pairs:
+            return []
+
+        out: List[IDCandidate] = []
+        for id_value, key in sorted(pairs):
+            if not self._candidate_inclusion_ok(id_value, key):
+                continue
+
+            dir_map = self.id_index.get(id_value, {}).get(key, {})
+            req_all = set(dir_map.get("request", set()))
+            resp_all = set(dir_map.get("response", set()))
+
+            # Restrict to this endpoint (same grouping policy as get_candidates()).
+            req = {mid for mid in req_all if self.msg_endpoint.get(mid, "?") == endpoint}
+            resp = {mid for mid in resp_all if self.msg_endpoint.get(mid, "?") == endpoint}
+            if not req and not resp:
+                continue
+
+            dir_set: Set[str] = set()
+            if req:
+                dir_set.add("request")
+            if resp:
+                dir_set.add("response")
+
+            is_deref, _ = self.has_dereference_pattern(id_value)
+            is_mutation = self.is_mutation_endpoint(endpoint)
+
+            binding = self.endpoint_token_coverage.get(endpoint, {}).get(id_value)
+            token_bound = bool(binding and binding.is_bound)
+            token_strength = binding.strength if binding else ""
+            token_locations = tuple(sorted(set(binding.locations))) if binding else ()
+
+            score_obj = self.get_candidate_score(id_value, key, endpoint, dir_set)
+            final_score = score_obj.finalize()
+            score_reasons = score_obj.reasons()
+
+            out.append(
+                IDCandidate(
+                    id_value=id_value,
+                    key=key,
+                    endpoint=endpoint,
+                    origin=self.id_origin.get(id_value, "unknown"),
+                    directions="+".join(sorted(dir_set)),
+                    score=int(final_score),
+                    score_reasons=score_reasons,
+                    host_priority=self.endpoint_host_priority.get(endpoint, "secondary"),
+                    parse_confidence=self.id_parse_confidence.get(id_value, ""),
+                    request_msgs=tuple(sorted(req))[:25],
+                    response_msgs=tuple(sorted(resp))[:25],
+                    req_count=len(req),
+                    resp_count=len(resp),
+                    sources=tuple(sorted(self.id_sources.get(id_value, set()))),
+                    is_mutation=is_mutation,
+                    is_deref=is_deref,
+                    graphql_ops=tuple(sorted(self.id_to_operations.get(id_value, set()))),
+                    token_bound=token_bound,
+                    token_strength=token_strength,
+                    token_locations=token_locations,
+                )
+            )
+
+        # Keep the same ordering policy as get_candidates().
+        out.sort(
+            key=lambda c: (c.score, c.host_priority == "primary", self.is_selector_like_id(c.id_value, c.key)),
+            reverse=True,
+        )
+        return out
 
     def get_endpoint_directionality(self) -> Dict[str, Dict[str, Set[str]]]:
         """
