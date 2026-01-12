@@ -43,6 +43,8 @@ from pathlib import Path
 from typing import Optional, Dict, Set, Tuple, List, Any
 from urllib.parse import unquote
 from dataclasses import dataclass, field
+import pickle
+import hashlib
 
 
 # ============================================================
