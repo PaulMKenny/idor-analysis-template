@@ -373,7 +373,7 @@ def decode_http(elem) -> bytes:
     except Exception:
         return b""
 
-```
+
 def iter_http_messages(xml_path: str):
     """
     Iterate over HTTP messages in Burp XML export (streaming).
@@ -391,7 +391,6 @@ def iter_http_messages(xml_path: str):
         yield idx, decode_http(req_el), decode_http(resp_el)
         # Critical: free memory as we stream
         elem.clear()
-```
 
 
 
