@@ -675,7 +675,7 @@ def _apply_chaining(
     return out
 
 
-def _get_placeholder_reason(candidate: IDCandidate) -> str:
+def _get_placeholder_reason(candidate: CandidateInfo) -> str:
     """Get human-readable reason for placeholder-only."""
     if candidate.token_bound:
         return "token-bound: mutations break signature"
