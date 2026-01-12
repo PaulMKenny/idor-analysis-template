@@ -2235,7 +2235,7 @@ def export_permutator_index(analyzer: IDORAnalyzer, out_path: str):
         for msg_id in c.request_msgs:
             candidates_by_msg[msg_id].append(c)
         for msg_id in c.response_msgs:
-            if msg_id not in [m for m in c.request_msgs]:
+            if msg_id not in c.request_msgs:
                 candidates_by_msg[msg_id].append(c)
     
     # Build index
