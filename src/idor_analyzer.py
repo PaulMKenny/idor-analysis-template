@@ -1073,9 +1073,12 @@ class IDORAnalyzer:
         for msg_id, raw_req, raw_resp in iter_http_messages(self.xml_path):
             processed = msg_id
 
-            if msg_id % 100 == 0:
-                pct = (msg_id * 100) // total if total else 0
-                print(f"\r    {msg_id}/{total} ({pct}%)", end="", flush=True)
+            if msg_id % 50 == 0:
+                if total:
+                    pct = (msg_id * 100) // total
+                    print(f"\r    {msg_id}/{total} ({pct}%)", end="", flush=True)
+                else:
+                    print(f"\r    {msg_id} messages", end="", flush=True)
 
             self.raw_messages[msg_id] = {
                 "request": raw_req.decode(errors="replace"),
@@ -1084,7 +1087,10 @@ class IDORAnalyzer:
 
             self._process(msg_id, raw_req, raw_resp)
 
-        print(f"\r    {processed}/{total} (100%)")
+        if total:
+            print(f"\r    {processed}/{total} (100%)")
+        else:
+            print(f"\r    {processed} messages (done)")
 
         # --------------------------------------------------
         # Phase 2/3 — Extraction Summary
