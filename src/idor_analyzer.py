@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 import pickle
 import hashlib
 
+_SPLIT_EXEC = ThreadPoolExecutor(max_workers=2)
+
 
 # ------------------------------
 # Pickle-safe defaultdict factories (NO lambdas)
@@ -371,13 +373,26 @@ def decode_http(elem) -> bytes:
     except Exception:
         return b""
 
-
+```
 def iter_http_messages(xml_path: str):
-    """Iterate over HTTP messages in Burp XML export."""
-    tree = ET.parse(xml_path)
-    root = tree.getroot()
-    for idx, item in enumerate(root.findall("item"), start=1):
-        yield idx, decode_http(item.find("request")), decode_http(item.find("response"))
+    """
+    Iterate over HTTP messages in Burp XML export (streaming).
+    Uses iterparse to avoid building a full DOM (memory + speed win on large XML).
+    """
+    idx = 0
+    # Note: Burp exports are typically namespace-free; if yours has namespaces,
+    # you can still match on elem.tag.endswith("item").
+    for ev, elem in ET.iterparse(xml_path, events=("end",)):
+        if elem.tag != "item":
+            continue
+        idx += 1
+        req_el = elem.find("request")
+        resp_el = elem.find("response")
+        yield idx, decode_http(req_el), decode_http(resp_el)
+        # Critical: free memory as we stream
+        elem.clear()
+```
+
 
 
 def split_http_message(raw: bytes) -> Tuple[str, Dict[str, str], bytes]:
@@ -403,6 +418,21 @@ def split_http_message(raw: bytes) -> Tuple[str, Dict[str, str], bytes]:
             headers[k.strip().lower()] = v.strip()
 
     return first_line, headers, body
+
+def split_http_pair(
+    raw_req: bytes, raw_resp: bytes
+) -> Tuple[
+    Tuple[str, Dict[str, str], bytes],
+    Tuple[str, Dict[str, str], bytes],
+]:
+    """
+    Split request + response concurrently.
+    Pure refactor: same results as calling split_http_message twice.
+    """
+    f_req = _SPLIT_EXEC.submit(split_http_message, raw_req)
+    f_resp = _SPLIT_EXEC.submit(split_http_message, raw_resp)
+    return f_req.result(), f_resp.result()
+
 
 
 def parse_request_line(request_line: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1079,8 +1109,7 @@ class IDORAnalyzer:
 
     def _process(self, msg_id: int, raw_req: bytes, raw_resp: bytes):
         """Process a single HTTP message pair."""
-        req_line, req_headers, req_body = split_http_message(raw_req)
-        resp_line, resp_headers, resp_body = split_http_message(raw_resp)
+        (req_line, req_headers, req_body), (resp_line, resp_headers, resp_body) = split_http_pair(raw_req, raw_resp)
 
         method, path = parse_request_line(req_line)
         host = (req_headers.get("host") or "").lower()
