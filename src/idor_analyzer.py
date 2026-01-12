@@ -38,6 +38,7 @@ import json
 import re
 import html
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 import heapq
 import mmap
 from collections import defaultdict
