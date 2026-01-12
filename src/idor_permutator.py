@@ -780,14 +780,18 @@ def main():
     index = load_permutator_index(args.xml)
     
     if index is None:
-        print("ERROR: Permutator index not found.")
-        print(f"Run idor_analyzer.py on {args.xml} first to generate the index.")
+        print("ERROR: Permutator index not found.", flush=True)
+        print(f"Run idor_analyzer.py on {args.xml} first to generate the index.", flush=True)
         sys.exit(1)
     
     msg_key = str(args.msg_id)
     if msg_key not in index:
-        print(f"ERROR: Message ID {args.msg_id} not in index.")
-        print(f"Available message IDs: {len(index)}")
+        print(f"ERROR: Message ID {args.msg_id} not in index.", flush=True)
+        print(f"Index contains {len(index)} messages.", flush=True)
+        # Show sample of available message IDs
+        sample_ids = sorted(int(k) for k in index.keys())[:20]
+        print(f"Sample message IDs: {sample_ids}", flush=True)
+        print(f"\nNOTE: Message ID is from 'req_msgs' field, NOT the score in brackets.", flush=True)
         sys.exit(1)
     
     msg_data = index[msg_key]
@@ -797,7 +801,7 @@ def main():
     # Parse request line
     parts = request_line.split()
     if len(parts) < 2:
-        print("Could not parse request line.")
+        print("Could not parse request line.", flush=True)
         sys.exit(1)
     
     method, path = parts[0], parts[1]
@@ -818,7 +822,7 @@ def main():
     ]
     
     if not candidates:
-        print("No IDOR candidates associated with this message.")
+        print("No IDOR candidates associated with this message.", flush=True)
         sys.exit(0)
     
     # Extract IDs in path
@@ -860,9 +864,9 @@ def main():
                 all_mutations.append(m)
     
     if not all_mutations:
-        print("No mutations generated. Candidate IDs not found in request path.")
-        print(f"Path: {path}")
-        print(f"Candidate IDs: [" + ", ".join(c.id_value for c in selected) + "]")
+        print("No mutations generated. Candidate IDs not found in request path.", flush=True)
+        print(f"Path: {path}", flush=True)
+        print(f"Candidate IDs: [" + ", ".join(c.id_value for c in selected) + "]", flush=True)
         sys.exit(0)
     
     # Output
