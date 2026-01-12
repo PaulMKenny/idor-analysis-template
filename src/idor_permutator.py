@@ -24,6 +24,7 @@ Changes from original:
 - Added negative numeric values
 - Improved replace_id to handle edge cases
 - Added octal encoding for numeric IDs
+- Added --chain-depth for combining mutations
 """
 
 import sys
@@ -32,6 +33,7 @@ import argparse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import quote
+from itertools import combinations
 
 # Import analyzer (unchanged)
 from idor_analyzer import IDORAnalyzer, IDCandidate
@@ -393,7 +395,8 @@ def apply_structural_mutation(
 def generate_mutations(
     method: str,
     path: str,
-    candidate: IDCandidate
+    candidate: IDCandidate,
+    chain_depth: int = 1
 ) -> List[StartLineMutation]:
     """
     Generate all applicable start-line mutations for a candidate.
@@ -406,6 +409,7 @@ def generate_mutations(
     5. Subpath variants
     6. Version prefix injections
     7. Placeholder (always last for FULL_MUTATION)
+    8. If chain_depth > 1, combine mutations
     """
     out: List[StartLineMutation] = []
     id_value = candidate.id_value
@@ -553,6 +557,73 @@ def generate_mutations(
         )
     )
 
+    # === CHAIN DEPTH > 1: Combine mutations ===
+    if chain_depth > 1:
+        out = _apply_chaining(out, method, path, id_value, chain_depth)
+
+    return out
+
+
+def _apply_chaining(
+    base_mutations: List[StartLineMutation],
+    method: str,
+    original_path: str,
+    id_value: str,
+    chain_depth: int
+) -> List[StartLineMutation]:
+    """
+    Combine mutations up to chain_depth layers.
+    
+    For depth=2: take each mutation and apply structural mutations on top.
+    This finds bugs where you need BOTH an ID change AND a path trick.
+    """
+    out = list(base_mutations)  # Keep all single mutations
+    
+    if chain_depth < 2:
+        return out
+    
+    # Get boundary/UUID mutations (ID value changes)
+    id_mutations = [
+        m for m in base_mutations 
+        if m.mutation_class in ("boundary", "uuid_boundary") 
+        and m.path != original_path
+    ]
+    
+    # Get structural mutations that don't change the ID
+    structural_kinds = [
+        "trailing_slash", "double_slash_before", "dot_segment_before",
+        "null_byte", "double_url_encode"
+    ]
+    
+    # For each ID mutation, apply structural mutations on top
+    seen = {(m.method, m.path) for m in out}
+    
+    for id_mut in id_mutations[:10]:  # Limit to avoid explosion
+        # Find the new ID value in this mutation's path
+        new_id = None
+        for boundary in BOUNDARY_ABSOLUTE + [str(int(id_value) + 1), str(int(id_value) - 1)] if is_numeric_id(id_value) else [NULL_UUID, MAX_UUID]:
+            if boundary in id_mut.path:
+                new_id = boundary
+                break
+        
+        if not new_id:
+            continue
+        
+        pos = find_id_in_path(id_mut.path, new_id)
+        
+        for kind in structural_kinds:
+            chained_path = apply_structural_mutation(id_mut.path, new_id, kind, pos)
+            if chained_path and (method, chained_path) not in seen:
+                seen.add((method, chained_path))
+                out.append(
+                    StartLineMutation(
+                        method,
+                        chained_path,
+                        f"chained:{id_mut.mutation_class}+{kind}",
+                        note=f"{id_mut.note} + {kind}"
+                    )
+                )
+    
     return out
 
 
@@ -653,6 +724,8 @@ def main():
                     help="Generate mutations for all candidates (not just top)")
     ap.add_argument("--format", choices=["text", "burp", "json"], default="text",
                     help="Output format")
+    ap.add_argument("--chain-depth", type=int, default=1,
+                    help="Mutation chain depth (1=single, 2+=combine mutations)")
     args = ap.parse_args()
 
     analyzer = IDORAnalyzer(args.xml)
@@ -714,7 +787,7 @@ def main():
             continue
         
         processed_candidates.append(candidate)
-        mutations = generate_mutations(method, path, candidate)
+        mutations = generate_mutations(method, path, candidate, chain_depth=args.chain_depth)
         
         for m in mutations:
             key = (m.method, m.path)
@@ -739,6 +812,7 @@ def main():
             "msg_id": args.msg_id,
             "host": host,
             "original": f"{method} {path}",
+            "chain_depth": args.chain_depth,
             "candidates": [
                 {
                     "key": c.key,
@@ -770,6 +844,7 @@ def main():
         print(f"Original: {method} {path}")
         print(f"Path IDs found: {path_ids}")
         print(f"Candidates processed: {len(processed_candidates)}")
+        print(f"Chain depth: {args.chain_depth}")
         print(f"Total mutations: {len(all_mutations)}")
         
         if processed_candidates:
