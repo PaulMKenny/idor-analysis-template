@@ -327,7 +327,7 @@ def run_permutator_from_session():
 
     fmt = input("Output format [text/burp/json] (default: text): ").strip() or "text"
 
-    chain_depth_raw = input("Chain depth (default: 2): ").strip()
+    chain_depth_raw = input("Chain depth for full output (default: 2): ").strip()
     chain_depth = 2
     if chain_depth_raw:
         if not chain_depth_raw.isdigit() or int(chain_depth_raw) < 1:
@@ -335,23 +335,21 @@ def run_permutator_from_session():
             return
         chain_depth = int(chain_depth_raw)
 
-    out_file = output_dir / f"permutations_msg{msg_id}.txt"
+    single_file = output_dir / f"permutations_msg{msg_id}_single.txt"
+    chained_file = output_dir / f"permutations_msg{msg_id}_chained.txt"
 
-    cmd = [
+    # === PASS 1: Single mutations (immediate) ===
+    print("\n[*] Generating single mutations...")
+    
+    cmd_single = [
         "python3", str(SRC_DIR / "idor_permutator.py"),
         str(history), msg_id,
         "--format", fmt,
-        "--verbose",
+        "--chain-depth", "1",
     ]
 
-    # Only pass if user wants something other than default, but it’s fine either way.
-    if chain_depth != 2:
-        cmd += ["--chain-depth", str(chain_depth)]
-    else:
-        cmd += ["--chain-depth", "2"]
-
     process = subprocess.Popen(
-        cmd,
+        cmd_single,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -365,13 +363,46 @@ def run_permutator_from_session():
     if stderr_text:
         print(stderr_text)
 
-    with open(out_file, "w", encoding="utf-8") as f:
+    with open(single_file, "w", encoding="utf-8") as f:
         f.write("".join(stdout_lines))
-        if stderr_text:
-            f.write("\n=== STDERR ===\n")
-            f.write(stderr_text)
 
-    print(f"\n[+] Saved to: {out_file}\n")
+    print(f"\n[+] Single mutations: {single_file}")
+    print("[*] You can start testing now.\n")
+
+    # === PASS 2: Chained mutations (if chain_depth > 1) ===
+    if chain_depth > 1:
+        print(f"[*] Generating chained mutations (depth={chain_depth})...")
+        
+        cmd_chained = [
+            "python3", str(SRC_DIR / "idor_permutator.py"),
+            str(history), msg_id,
+            "--format", fmt,
+            "--chain-depth", str(chain_depth),
+        ]
+
+        process = subprocess.Popen(
+            cmd_chained,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout_lines = []
+        for line in process.stdout:
+            stdout_lines.append(line)
+            # Don't print chained - just save
+        process.wait()
+        stderr_text = process.stderr.read()
+
+        with open(chained_file, "w", encoding="utf-8") as f:
+            f.write("".join(stdout_lines))
+            if stderr_text:
+                f.write("\n=== STDERR ===\n")
+                f.write(stderr_text)
+
+        print(f"[+] Chained mutations: {chained_file}")
+
+    print()
+
 
 # ==========================================================
 # CODIUM LAUNCHER
