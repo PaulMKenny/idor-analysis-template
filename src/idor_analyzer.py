@@ -957,36 +957,66 @@ class IDORAnalyzer:
             pass
 
 
-
     def analyze(self):
-        """Run analysis on all HTTP messages."""
+        """
+        Run full IDOR analysis with explicit phase reporting.
+
+        Phase 1/3: Parse + extract IDs from HTTP messages
+        Phase 2/3: Post-extraction summary (IDs, messages)
+        Phase 3/3: Candidate scoring (lazy, triggered later)
+        """
+
         if self.analyzed:
             return
 
         # === FAST PATH: LOAD CACHE ===
         if self._load_cache():
+            print("[*] Loaded analyzer state from cache")
             return
 
-        # Count total for progress
-        print("[*] Counting messages...", end="", flush=True)
-        total = sum(1 for _ in ET.parse(self.xml_path).getroot().findall("item"))
-        print(f" {total} found")
+        # --------------------------------------------------
+        # Phase 1/3 — Parsing + Extraction
+        # --------------------------------------------------
+        print("[*] Phase 1/3: Parsing HTTP messages and extracting IDs...")
 
-        print("[*] Extracting IDs...")
+        total = sum(1 for _ in ET.parse(self.xml_path).getroot().findall("item"))
+        processed = 0
+
         for msg_id, raw_req, raw_resp in iter_http_messages(self.xml_path):
+            processed = msg_id
+
             if msg_id % 100 == 0:
-                print(f"\r    {msg_id}/{total} ({100*msg_id//total}%)", end="", flush=True)
+                pct = (msg_id * 100) // total if total else 0
+                print(f"\r    {msg_id}/{total} ({pct}%)", end="", flush=True)
 
             self.raw_messages[msg_id] = {
                 "request": raw_req.decode(errors="replace"),
                 "response": raw_resp.decode(errors="replace"),
             }
+
             self._process(msg_id, raw_req, raw_resp)
 
-        print(f"\r    {msg_id}/{total} (100%) - {len(self.id_index)} unique IDs")
+        print(f"\r    {processed}/{total} (100%)")
 
+        # --------------------------------------------------
+        # Phase 2/3 — Extraction Summary
+        # --------------------------------------------------
+        print(
+            f"[*] Phase 2/3: Extracted {len(self.id_index)} unique IDs "
+            f"from {processed} messages"
+        )
+
+        # Mark analysis complete (candidate scoring is lazy)
         self.analyzed = True
+
+        # Save disk cache AFTER successful extraction
         self._save_cache()
+
+        # --------------------------------------------------
+        # Phase 3/3 — Candidate Scoring (Lazy)
+        # --------------------------------------------------
+        print("[*] Phase 3/3: Candidate scoring will run on first access (lazy)")
+
 
 
     def _process(self, msg_id: int, raw_req: bytes, raw_resp: bytes):
