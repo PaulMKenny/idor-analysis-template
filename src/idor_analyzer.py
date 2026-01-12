@@ -915,6 +915,46 @@ class IDORAnalyzer:
         self.analyzed = False
 
 
+    # ==================================================
+    # CACHE HELPERS (TRANSPARENT)
+    # ==================================================
+
+    def _compute_cache_path(self) -> Path:
+        """
+        Cache file is derived from:
+        - absolute XML path
+        - file size
+        - mtime
+        """
+        p = Path(self.xml_path).resolve()
+        try:
+            stat = p.stat()
+        except FileNotFoundError:
+            return p.with_suffix(".idor.cache")
+
+        key = f"{p}:{stat.st_size}:{int(stat.st_mtime)}"
+        digest = hashlib.sha256(key.encode()).hexdigest()[:16]
+        return p.with_suffix(f".idor.{digest}.cache")
+
+    def _load_cache(self) -> bool:
+        if not self._cache_path.exists():
+            return False
+        try:
+            with open(self._cache_path, "rb") as f:
+                state = pickle.load(f)
+            self.__dict__.update(state)
+            self.analyzed = True
+            return True
+        except Exception:
+            return False
+
+    def _save_cache(self):
+        try:
+            state = dict(self.__dict__)
+            with open(self._cache_path, "wb") as f:
+                pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception:
+            pass
 
 
 
