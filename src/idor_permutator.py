@@ -765,10 +765,10 @@ def format_output(
 
 def main():
     ap = argparse.ArgumentParser(description="IDOR Start-Line Permutator")
-    ap.add_argument("xml", help="Burp history XML")
+    ap.add_argument("xml", help="Burp history XML (or path to find index)")
     ap.add_argument("msg_id", type=int, help="Message ID")
     ap.add_argument("-v", "--verbose", action="store_true", help="Show mutation notes")
-    ap.add_argument("--all-candidates", action="store_true", 
+    ap.add_argument("--all-candidates", action="store_true",
                     help="Generate mutations for all candidates (not just top)")
     ap.add_argument("--format", choices=["text", "burp", "json"], default="text",
                     help="Output format")
@@ -776,59 +776,75 @@ def main():
                     help="Mutation chain depth (1=single, 2+=combine mutations)")
     args = ap.parse_args()
 
-    analyzer = IDORAnalyzer(args.xml)
-    analyzer.analyze()
-
-    # Get request details
-    raw_req = analyzer.raw_messages[args.msg_id]["request"]
-    first_line = raw_req.splitlines()[0]
-    parts = first_line.split()
+    # Load index (fast path)
+    index = load_permutator_index(args.xml)
+    
+    if index is None:
+        print("ERROR: Permutator index not found.")
+        print(f"Run idor_analyzer.py on {args.xml} first to generate the index.")
+        sys.exit(1)
+    
+    msg_key = str(args.msg_id)
+    if msg_key not in index:
+        print(f"ERROR: Message ID {args.msg_id} not in index.")
+        print(f"Available message IDs: {len(index)}")
+        sys.exit(1)
+    
+    msg_data = index[msg_key]
+    request_line = msg_data["request_line"]
+    host = msg_data["host"]
+    
+    # Parse request line
+    parts = request_line.split()
     if len(parts) < 2:
         print("Could not parse request line.")
         sys.exit(1)
     
     method, path = parts[0], parts[1]
-    host = analyzer.host_by_msg.get(args.msg_id, "unknown")
-
-    # Extract IDs actually in the path
-    from idor_analyzer import extract_path_ids
-    path_ids = extract_path_ids(path)  # [(key, value), ...]
-    path_id_values = {v for k, v in path_ids}
-
-    candidates = analyzer.get_candidates_for_msg(args.msg_id)
-
+    
+    # Load candidates as CandidateInfo objects
+    candidates = [
+        CandidateInfo(
+            id_value=c["id_value"],
+            key=c["key"],
+            origin=c["origin"],
+            sources=tuple(c["sources"]),
+            token_bound=c["token_bound"],
+            token_strength=c["token_strength"],
+            score=c["score"],
+            is_informational=c.get("is_informational", False),
+        )
+        for c in msg_data["candidates"]
+    ]
+    
     if not candidates:
         print("No IDOR candidates associated with this message.")
         sys.exit(0)
-
-    # Match candidates to path IDs - prefer candidates whose ID is in the path
+    
+    # Extract IDs in path
+    path_ids = extract_path_ids(path)
+    path_id_values = {v for k, v in path_ids}
+    
+    # Prioritize candidates whose ID is in path
     path_candidates = [c for c in candidates if c.id_value in path_id_values]
     other_candidates = [c for c in candidates if c.id_value not in path_id_values]
     
-    # Sort each group by score
     path_candidates.sort(key=lambda c: c.score, reverse=True)
     other_candidates.sort(key=lambda c: c.score, reverse=True)
     
-    # Prioritize path candidates
     sorted_candidates = path_candidates + other_candidates
-
-    if not sorted_candidates:
-        print("No candidates found.")
-        sys.exit(0)
-
-    # Select candidates to process
+    
+    # Select candidates
     if args.all_candidates:
         selected = sorted_candidates
     else:
-        # Take top path candidate, or top other if no path candidates
         selected = [sorted_candidates[0]]
-
+    
     all_mutations: List[StartLineMutation] = []
     seen: set = set()
-    processed_candidates: List[IDCandidate] = []
-
+    processed_candidates: List[CandidateInfo] = []
+    
     for candidate in selected:
-        # Only generate mutations if ID is actually in path
         if candidate.id_value not in path:
             if args.verbose:
                 print(f"[!] Skipping {candidate.key}={candidate.id_value} (not in path)")
@@ -842,20 +858,19 @@ def main():
             if key not in seen:
                 seen.add(key)
                 all_mutations.append(m)
-
+    
     if not all_mutations:
         print("No mutations generated. Candidate IDs not found in request path.")
         print(f"Path: {path}")
-        print(f"Candidate IDs: {[c.id_value for c in selected]}")
+        print(f"Candidate IDs: [" + ", ".join(c.id_value for c in selected) + "]")
         sys.exit(0)
-
+    
     # Output
     if args.format == "burp":
         for m in all_mutations:
             print(f"{m.method} {m.path} HTTP/1.1")
     
     elif args.format == "json":
-        import json
         data = {
             "msg_id": args.msg_id,
             "host": host,
