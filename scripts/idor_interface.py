@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import subprocess
 from pathlib import Path
@@ -125,9 +126,178 @@ def list_sessions():
         print(f"- {s.name}")
     print()
 
-# ==========================================================
-# TREE BROWSER
-# ==========================================================
+
+def select_session_from_menu(label: str) -> Path | None:
+    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
+    if not sessions:
+        print("ERROR: No sessions available.\n")
+        return None
+
+    print(f"\n=== Select {label} session ===")
+    for i, s in enumerate(sessions, 1):
+        print(f"[{i}] {s.name}")
+
+    try:
+        idx = int(input("> ").strip()) - 1
+        return sessions[idx]
+    except Exception:
+        print("ERROR: Invalid selection.\n")
+        return None
+
+
+def select_xml_from_session_input(session_root: Path, label: str) -> Path | None:
+    input_dir = session_root / "input"
+    if not input_dir.is_dir():
+        print(f"ERROR: {label} input directory missing\n")
+        return None
+
+    xmls = sorted(input_dir.glob("*.xml"))
+    if not xmls:
+        print(f"ERROR: No XML files found for {label}\n")
+        return None
+
+    print(f"\n=== Select {label} XML ===")
+    for i, x in enumerate(xmls, 1):
+        print(f"[{i}] {x.name}")
+
+    try:
+        idx = int(input("> ").strip()) - 1
+        return xmls[idx]
+    except Exception:
+        print("ERROR: Invalid selection\n")
+        return None
+
+
+def _parse_request_line(first_line: str) -> tuple[str, str]:
+    parts = first_line.strip().split()
+    if len(parts) < 2:
+        return "", ""
+    return parts[0].upper(), parts[1]
+
+
+def _parameterize_path(path: str) -> str:
+    if "?" in path:
+        base, query = path.split("?", 1)
+        q = "?" + query
+    else:
+        base, q = path, ""
+
+    segs = base.split("/")
+    n = 0
+    for i, seg in enumerate(segs):
+        if re.fullmatch(r"\d{4,}", seg) or re.fullmatch(r"[0-9a-fA-F]{16,}", seg):
+            n += 1
+            segs[i] = "{id}" if n == 1 else f"{{id{n}}}"
+    return "/".join(segs) + q
+
+
+def _normalize_path_for_match(path: str) -> str:
+    p = _parameterize_path(path)
+    p = re.sub(r"\b\d{4,}\b", "{id}", p)
+    p = re.sub(r"\b[0-9a-fA-F]{16,}\b", "{id}", p)
+    return p
+
+
+def _get_raw_request_by_msg_id(history_xml: Path, msg_id: int) -> bytes | None:
+    sys.path.insert(0, str(SRC_DIR))
+    from idor_analyzer import iter_http_messages
+
+    for mid, raw_req, _ in iter_http_messages(str(history_xml)):
+        if mid == msg_id:
+            return raw_req
+    return None
+
+
+def _find_matching_request(history_xml: Path, method: str, norm_path: str):
+    sys.path.insert(0, str(SRC_DIR))
+    from idor_analyzer import iter_http_messages, split_http_message
+
+    for mid, raw_req, _ in iter_http_messages(str(history_xml)):
+        first, _, _ = split_http_message(raw_req)
+        m, p = _parse_request_line(first)
+        if m == method and _normalize_path_for_match(p) == norm_path:
+            return mid, raw_req
+    return None
+
+
+def _build_curl(url: str, method: str, headers: dict, body: bytes) -> str:
+    skip = {"host", "content-length"}
+
+    lines = [f"curl -X {method} '{url}' \\"]
+    for k, v in headers.items():
+        if k in skip:
+            continue
+        lines.append(f"  -H '{k}: {v}' \\")
+
+    if body:
+        lines.append("  --data-binary @- <<'EOF'")
+        lines.append(body.decode(errors="replace"))
+        lines.append("EOF")
+    else:
+        lines[-1] = lines[-1].rstrip("\\")
+
+    return "\n".join(lines)
+
+
+def run_userA_userB_replay_diff():
+    if NAV_MODE != "session":
+        return
+
+    session_a = select_session_from_menu("User A")
+    session_b = select_session_from_menu("User B")
+    if not session_a or not session_b:
+        return
+
+    history_a = select_xml_from_session_input(session_a, "User A history")
+    history_b = select_xml_from_session_input(session_b, "User B history")
+    if not history_a or not history_b:
+        return
+
+    msg_id = int(input("Enter candidate msg_id: ").strip())
+
+    sys.path.insert(0, str(SRC_DIR))
+    from idor_analyzer import split_http_message
+
+    raw_a = _get_raw_request_by_msg_id(history_a, msg_id)
+    if not raw_a:
+        print("ERROR: msg_id not found in User A session")
+        return
+
+    a_first, a_hdrs, a_body = split_http_message(raw_a)
+    method, path = _parse_request_line(a_first)
+    norm = _normalize_path_for_match(path)
+
+    match = _find_matching_request(history_b, method, norm)
+    if not match:
+        print("ERROR: No matching User B request")
+        return
+
+    _, raw_b = match
+    _, b_hdrs, _ = split_http_message(raw_b)
+
+    merged_hdrs = dict(b_hdrs)
+    for k in ("content-type", "accept"):
+        if k in a_hdrs:
+            merged_hdrs[k] = a_hdrs[k]
+
+    host = merged_hdrs.get("host")
+    url = f"https://{host}{path}"
+
+    curl = _build_curl(url, method, merged_hdrs, a_body)
+    param = f"{method} {_parameterize_path(path)}"
+
+    out = session_b / "output"
+    out.mkdir(exist_ok=True)
+    out_file = out / f"replay_diff_msg_{msg_id}.txt"
+
+    with open(out_file, "w") as f:
+        f.write("=== CURL ===\n")
+        f.write(curl + "\n\n")
+        f.write("=== PARAMETERIZED ===\n")
+        f.write(param + "\n")
+
+    print(f"[+] Written {out_file}")
+
 
 def browse_tree_and_save():
     root = browse_root()
@@ -597,6 +767,7 @@ def show_menu():
         print("6) Dump raw HTTP history")
         print("7) Run IDOR permutator")
         print("8) Repeat session (copy inputs)")
+        print("9) Auto-replay + diff (User A vs User B)")
 
     print("c) Open saved item in Codium")
     print("m) Toggle navigation mode (project / session)")
@@ -636,6 +807,9 @@ while True:
         case "8":
             if NAV_MODE == "session":
                 repeat_session()
+        case "9":
+            if NAV_MODE == "session":
+                run_userA_userB_replay_diff()
         case "s" | "S":
             show_saved_box()
         case "c" | "C":
