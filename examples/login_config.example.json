@@ -1,0 +1,29 @@
+{
+  "comment": "Example login configuration for session token renewal",
+  "comment2": "Copy this to sessions/{session_name}/login_config.json and customize",
+
+  "login_url": "https://example.com/login",
+
+  "selectors": {
+    "username": "#username",
+    "password": "#password",
+    "submit": "button[type='submit']"
+  },
+
+  "credentials": {
+    "username": "testuser@example.com",
+    "password": "testpassword123"
+  },
+
+  "success_indicator": {
+    "comment": "Options: url_contains, element, or omit for 3-second wait",
+    "type": "url_contains",
+    "value": "/dashboard"
+  },
+
+  "auth_header_extraction": {
+    "comment": "Optional: Extract JWT/token from browser storage",
+    "storage_key": "auth_token",
+    "prefix": "Bearer"
+  }
+}

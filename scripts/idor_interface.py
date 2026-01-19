@@ -2,6 +2,7 @@
 import os
 import sys
 import subprocess
+import re
 from pathlib import Path
 
 
@@ -194,6 +195,243 @@ def select_xml_from_session_input(session_root: Path, label: str) -> Path | None
     except Exception:
         print("ERROR: Invalid selection.\n")
         return None
+
+# ==========================================================
+# DIFF MODULE: User A vs User B comparison with token renewal
+# ==========================================================
+
+def select_session_from_menu(label: str) -> Path | None:
+    """Select a session from interactive menu."""
+    sessions = sorted(p for p in SESSIONS_DIR.iterdir() if p.is_dir())
+    if not sessions:
+        print("ERROR: No sessions available.\n")
+        return None
+
+    print(f"\n=== Select {label} session ===")
+    for i, s in enumerate(sessions, 1):
+        print(f"[{i}] {s.name}")
+
+    try:
+        idx = int(input("> ").strip()) - 1
+        return sessions[idx]
+    except Exception:
+        print("ERROR: Invalid selection.\n")
+        return None
+
+
+def _parse_request_line(first_line: str) -> tuple[str, str]:
+    """Parse HTTP request line to extract method and path."""
+    parts = first_line.strip().split()
+    if len(parts) < 2:
+        return "", ""
+    return parts[0].upper(), parts[1]
+
+
+def _parameterize_path(path: str) -> str:
+    """
+    Replace numeric/hex IDs in path with {id} placeholders.
+    Example: /api/users/1234/profile -> /api/users/{id}/profile
+    """
+    if "?" in path:
+        base, query = path.split("?", 1)
+        q = "?" + query
+    else:
+        base, q = path, ""
+
+    segs = base.split("/")
+    n = 0
+    for i, seg in enumerate(segs):
+        # Match 4+ digit numbers or 16+ hex strings (UUIDs)
+        if re.fullmatch(r"\d{4,}", seg) or re.fullmatch(r"[0-9a-fA-F]{16,}", seg):
+            n += 1
+            segs[i] = "{id}" if n == 1 else f"{{id{n}}}"
+    return "/".join(segs) + q
+
+
+def _normalize_path_for_match(path: str) -> str:
+    """Normalize path for matching across sessions."""
+    p = _parameterize_path(path)
+    # Apply regex substitution for any remaining IDs
+    p = re.sub(r"\b\d{4,}\b", "{id}", p)
+    p = re.sub(r"\b[0-9a-fA-F]{16,}\b", "{id}", p)
+    return p
+
+
+def _get_raw_request_by_msg_id(history_xml: Path, msg_id: int) -> bytes | None:
+    """Get raw HTTP request bytes for a specific message ID."""
+    sys.path.insert(0, str(SRC_DIR))
+    from idor_analyzer import iter_http_messages
+
+    for mid, raw_req, _ in iter_http_messages(str(history_xml)):
+        if mid == msg_id:
+            return raw_req
+    return None
+
+
+def _find_matching_request(history_xml: Path, method: str, norm_path: str):
+    """Find a request in history matching the method and normalized path."""
+    sys.path.insert(0, str(SRC_DIR))
+    from idor_analyzer import iter_http_messages, split_http_message
+
+    for mid, raw_req, _ in iter_http_messages(str(history_xml)):
+        first, _, _ = split_http_message(raw_req)
+        m, p = _parse_request_line(first)
+        if m == method and _normalize_path_for_match(p) == norm_path:
+            return mid, raw_req
+    return None
+
+
+def _build_curl(url: str, method: str, headers: dict, body: bytes) -> str:
+    """Build a curl command from request components."""
+    skip = {"host", "content-length"}
+
+    lines = [f"curl -X {method} '{url}' \\"]
+    for k, v in headers.items():
+        if k in skip:
+            continue
+        lines.append(f"  -H '{k}: {v}' \\")
+
+    if body:
+        lines.append("  --data-binary @- <<'EOF'")
+        lines.append(body.decode(errors="replace"))
+        lines.append("EOF")
+    else:
+        lines[-1] = lines[-1].rstrip("\\")
+
+    return "\n".join(lines)
+
+
+def configure_session_login():
+    """Configure login flow for a session (for token renewal)."""
+    if NAV_MODE != "session":
+        return
+
+    session = select_session_from_menu("Configure login for")
+    if not session:
+        return
+
+    sys.path.insert(0, str(SRC_DIR))
+    from session_renewer import SessionRenewer
+
+    renewer = SessionRenewer(session)
+    renewer.configure_login_flow()
+
+
+def run_userA_userB_replay_diff():
+    """
+    Main diff module workflow: Compare User A vs User B requests
+    with optional token renewal.
+    """
+    if NAV_MODE != "session":
+        return
+
+    # Select sessions
+    session_a = select_session_from_menu("User A")
+    session_b = select_session_from_menu("User B")
+    if not session_a or not session_b:
+        return
+
+    # Select history files
+    history_a = select_xml_from_session_input(session_a, "User A history")
+    history_b = select_xml_from_session_input(session_b, "User B history")
+    if not history_a or not history_b:
+        return
+
+    # Get message ID to compare
+    try:
+        msg_id = int(input("Enter candidate msg_id: ").strip())
+    except ValueError:
+        print("ERROR: Invalid message ID\n")
+        return
+
+    # Get User A's request
+    sys.path.insert(0, str(SRC_DIR))
+    from idor_analyzer import split_http_message
+    from session_renewer import select_token_refresh_mode, SessionRenewer, merge_fresh_tokens
+
+    raw_a = _get_raw_request_by_msg_id(history_a, msg_id)
+    if not raw_a:
+        print("ERROR: msg_id not found in User A session\n")
+        return
+
+    a_first, a_hdrs, a_body = split_http_message(raw_a)
+    method, path = _parse_request_line(a_first)
+    norm = _normalize_path_for_match(path)
+
+    # Find matching request in User B's history
+    match = _find_matching_request(history_b, method, norm)
+    if not match:
+        print("ERROR: No matching User B request\n")
+        print(f"Looked for: {method} {norm}\n")
+        return
+
+    _, raw_b = match
+    _, b_hdrs, _ = split_http_message(raw_b)
+
+    # Token renewal workflow
+    print("\n[*] Found matching request in User B session")
+    print(f"[*] User B tokens from XML may be stale\n")
+
+    mode = select_token_refresh_mode()
+
+    fresh_tokens = None
+    if mode == "playwright":
+        renewer = SessionRenewer(session_b)
+
+        # Check if config exists
+        if not renewer.config:
+            print("\n[!] No login configuration found for User B session.")
+            print("[!] Run menu option 7 first to configure login flow.\n")
+            fallback = input("Continue with manual token entry? [y/N]: ").strip().lower()
+            if fallback == 'y':
+                fresh_tokens = renewer.get_fresh_tokens_manual()
+        else:
+            # Ask headless vs headed
+            headless_choice = input("Run browser in headless mode? [Y/n]: ").strip().lower()
+            headless = headless_choice != 'n'
+            fresh_tokens = renewer.get_fresh_tokens_playwright(headless=headless)
+
+    elif mode == "manual":
+        renewer = SessionRenewer(session_b)
+        fresh_tokens = renewer.get_fresh_tokens_manual()
+
+    # Merge headers
+    merged_hdrs = dict(b_hdrs)
+
+    # Always prefer User A's content-type and accept
+    for k in ("content-type", "accept"):
+        if k in a_hdrs:
+            merged_hdrs[k] = a_hdrs[k]
+
+    # Merge fresh tokens if available
+    if fresh_tokens:
+        merged_hdrs = merge_fresh_tokens(merged_hdrs, fresh_tokens)
+
+    # Build curl command
+    host = merged_hdrs.get("host")
+    url = f"https://{host}{path}"
+
+    curl = _build_curl(url, method, merged_hdrs, a_body)
+    param = f"{method} {_parameterize_path(path)}"
+
+    # Write output
+    out = session_b / "output"
+    out.mkdir(exist_ok=True)
+    out_file = out / f"replay_diff_msg_{msg_id}.txt"
+
+    with open(out_file, "w") as f:
+        f.write("=== CURL ===\n")
+        f.write(curl + "\n\n")
+        f.write("=== PARAMETERIZED ===\n")
+        f.write(param + "\n")
+        f.write("\n=== NOTES ===\n")
+        f.write(f"User A session: {session_a.name}\n")
+        f.write(f"User B session: {session_b.name}\n")
+        f.write(f"Message ID: {msg_id}\n")
+        f.write(f"Token refresh mode: {mode}\n")
+
+    print(f"\n[+] Written {out_file}")
+    print("[*] You can now execute this curl command to test for IDOR\n")
 
 # ==========================================================
 # Raw transaction dump option
@@ -448,6 +686,8 @@ def show_menu():
         print("4) Run IDOR analyzer")
         print("5) Dump raw HTTP history")
         print("6) Run IDOR permutator (single message)")
+        print("7) Configure login flow (for token renewal)")
+        print("8) User A vs User B diff + replay (with token renewal)")
 
     print("c) Open saved item in Codium")
     print("m) Toggle navigation mode (project / session)")
@@ -480,6 +720,12 @@ while True:
         case "6":
             if NAV_MODE == "session":
                 run_permutator_from_session()
+        case "7":
+            if NAV_MODE == "session":
+                configure_session_login()
+        case "8":
+            if NAV_MODE == "session":
+                run_userA_userB_replay_diff()
         case "s" | "S":
             show_saved_box()
         case "c" | "C":

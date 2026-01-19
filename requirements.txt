@@ -1,0 +1,9 @@
+# Core dependencies for IDOR analysis
+# Note: Most modules use only Python standard library
+
+# Session token renewal (optional, for diff module)
+playwright>=1.40.0
+
+# Installation:
+# pip install -r requirements.txt
+# playwright install chromium
