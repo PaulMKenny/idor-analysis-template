@@ -1,0 +1,14 @@
+{
+  "session": 1,
+  "timestamp": "2026-01-19T10:00:00",
+  "description": "Example action sequence for testing user profile access",
+  "actions": [
+    ["goto", "https://example.com/dashboard"],
+    ["click", "text=Users"],
+    ["click", "text=John Doe"],
+    ["click", "button:has-text('Edit')"],
+    ["fill", "input[name=email]|newemail@example.com"],
+    ["click", "button:has-text('Save')"],
+    ["wait", 2000]
+  ]
+}
