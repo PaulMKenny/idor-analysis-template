@@ -6,8 +6,19 @@
 idor_candidates.csv
 idor_relevant_transactions.txt
 
+# Session outputs and configs (sensitive)
+sessions/*/output/
+sessions/*/login_config.json
+
 # Secrets
 .env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
 
 # Allow placeholder example
 !examples/placeholder_history.xml
