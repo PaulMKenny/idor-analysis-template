@@ -9,5 +9,14 @@ idor_relevant_transactions.txt
 # Secrets
 .env
 
+# Playwright session data
+scripts/auth-sessions/
+scripts/saved-sequences/
+scripts/.recording-config.json
+scripts/.replay-config.json
+scripts/test-results/
+scripts/playwright-report/
+scripts/playwright/.cache/
+
 # Allow placeholder example
 !examples/placeholder_history.xml
