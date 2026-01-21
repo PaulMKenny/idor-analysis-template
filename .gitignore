@@ -22,6 +22,9 @@ scripts/test-results/
 scripts/playwright-report/
 scripts/playwright/.cache/
 
+# Browser profiles (persistent contexts)
+scripts/auth-sessions/browser-profiles/
+
 # UI automation data
 ui-automation/recordings/
 ui-automation/*.json

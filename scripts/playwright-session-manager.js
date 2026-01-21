@@ -65,10 +65,14 @@ class AuthManager {
   constructor(baseDir = './auth-sessions') {
     this.baseDir = baseDir;
     this.usersFile = path.join(baseDir, 'users.json');
+    this.profilesDir = path.join(baseDir, 'browser-profiles');
     this.users = new Map();
 
     if (!fs.existsSync(baseDir)) {
       fs.mkdirSync(baseDir, { recursive: true });
+    }
+    if (!fs.existsSync(this.profilesDir)) {
+      fs.mkdirSync(this.profilesDir, { recursive: true });
     }
 
     // Load persisted users
@@ -120,6 +124,48 @@ class AuthManager {
     this.users.delete(userId);
     this.saveUsers();
     console.log(`✓ User ${userId} removed`);
+  }
+
+  /**
+   * Get persistent browser profile path for a user.
+   * Use with browserType.launchPersistentContext() for Cloudflare-protected sites.
+   *
+   * Why persistent contexts:
+   * - Preserves cookies (cf_clearance)
+   * - Preserves localStorage/sessionStorage
+   * - Preserves TLS fingerprint
+   * - Preserves browser entropy
+   * - Avoids Cloudflare verification loops
+   *
+   * This is the ONLY architecturally sound solution for Cloudflare.
+   */
+  getProfilePath(userId) {
+    return path.join(this.profilesDir, userId);
+  }
+
+  /**
+   * Launch a persistent browser context for a user.
+   * Recommended for all Cloudflare-protected targets.
+   *
+   * Example:
+   *   const context = await authManager.launchUserContext(chromium, 'alice');
+   *   const page = context.pages()[0] || await context.newPage();
+   */
+  async launchUserContext(browserType, userId, options = {}) {
+    if (!this.users.has(userId)) {
+      throw new Error(`User ${userId} not configured`);
+    }
+
+    const profilePath = this.getProfilePath(userId);
+    console.log(`🔐 Launching persistent context for ${userId}`);
+    console.log(`   Profile: ${profilePath}`);
+
+    const context = await browserType.launchPersistentContext(profilePath, {
+      headless: false,
+      ...options
+    });
+
+    return context;
   }
 
   async login(page, userId, loginFn) {

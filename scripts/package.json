@@ -14,7 +14,10 @@
     "test:mitm": "playwright test playwright-mitm-example.js --headed",
     "test:mitm:alice": "playwright test playwright-mitm-example.js --headed --grep 'alice'",
     "test:mitm:bob": "playwright test playwright-mitm-example.js --headed --grep 'bob'",
-    "test:mitm:multi": "playwright test playwright-mitm-example.js --headed --grep 'multi-user'"
+    "test:mitm:multi": "playwright test playwright-mitm-example.js --headed --grep 'multi-user'",
+    "demo:persistent": "node playwright-persistent-example.js",
+    "demo:persistent:wrong": "node playwright-persistent-example.js --wrong",
+    "demo:persistent:compare": "node playwright-persistent-example.js --compare"
   },
   "keywords": [
     "playwright",
