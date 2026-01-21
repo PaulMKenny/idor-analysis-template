@@ -74,8 +74,7 @@ class AuthManager {
     this.users.set(userId, {
       ...credentials,
       sessionFile: path.join(this.baseDir, `${userId}-session.json`),
-      idsFile: path.join(this.baseDir, `${userId}-ids.json`),
-      captureFile: path.join(this.baseDir, `${userId}-capture.json`)
+      idsFile: path.join(this.baseDir, `${userId}-ids.json`)
     });
   }
 
@@ -129,12 +128,6 @@ class AuthManager {
 
   getUserIds() {
     return Array.from(this.users.keys());
-  }
-
-  saveCapture(buckets, userId) {
-    const user = this.users.get(userId);
-    fs.writeFileSync(user.captureFile, JSON.stringify(buckets, null, 2));
-    console.log(`✓ Full capture saved: ${user.captureFile}`);
   }
 }
 

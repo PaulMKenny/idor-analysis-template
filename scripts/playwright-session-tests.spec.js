@@ -45,7 +45,6 @@ test.describe('Recording and Replay', () => {
       description: config.description
     });
 
-    authManager.saveCapture(capture, config.userId);
     sequenceManager.saveRecording(sequence.id, capture, config.userId);
 
     console.log(`\n✓ Sequence recorded: ${sequence.id}`);
