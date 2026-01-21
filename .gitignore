@@ -9,6 +9,9 @@ idor_relevant_transactions.txt
 # Secrets
 .env
 
+# Node modules
+node_modules/
+
 # Playwright session data
 scripts/auth-sessions/
 scripts/saved-sequences/
