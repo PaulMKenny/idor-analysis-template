@@ -64,10 +64,43 @@ function createActionAwareRequestLogger(page, now) {
 class AuthManager {
   constructor(baseDir = './auth-sessions') {
     this.baseDir = baseDir;
+    this.usersFile = path.join(baseDir, 'users.json');
     this.users = new Map();
+
     if (!fs.existsSync(baseDir)) {
       fs.mkdirSync(baseDir, { recursive: true });
     }
+
+    // Load persisted users
+    this.loadUsers();
+  }
+
+  loadUsers() {
+    if (fs.existsSync(this.usersFile)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(this.usersFile, 'utf8'));
+        Object.entries(data.users || {}).forEach(([userId, userData]) => {
+          this.users.set(userId, {
+            ...userData,
+            sessionFile: path.join(this.baseDir, `${userId}-session.json`),
+            idsFile: path.join(this.baseDir, `${userId}-ids.json`)
+          });
+        });
+      } catch (err) {
+        console.warn(`⚠️  Failed to load users: ${err.message}`);
+      }
+    }
+  }
+
+  saveUsers() {
+    const usersObj = {};
+    this.users.forEach((userData, userId) => {
+      // Save only credentials, not derived paths
+      const { sessionFile, idsFile, ...credentials } = userData;
+      usersObj[userId] = credentials;
+    });
+
+    fs.writeFileSync(this.usersFile, JSON.stringify({ users: usersObj }, null, 2));
   }
 
   addUser(userId, credentials) {
@@ -76,6 +109,17 @@ class AuthManager {
       sessionFile: path.join(this.baseDir, `${userId}-session.json`),
       idsFile: path.join(this.baseDir, `${userId}-ids.json`)
     });
+    this.saveUsers();
+    console.log(`✓ User ${userId} saved to: ${this.usersFile}`);
+  }
+
+  removeUser(userId) {
+    if (!this.users.has(userId)) {
+      throw new Error(`User ${userId} not found`);
+    }
+    this.users.delete(userId);
+    this.saveUsers();
+    console.log(`✓ User ${userId} removed`);
   }
 
   async login(page, userId, loginFn) {
@@ -365,17 +409,38 @@ class InteractiveCLI {
   }
 
   async configureUsers() {
-    console.log('\n=== CONFIGURE USERS ===');
-    console.log('Current users:', this.authManager.getUserIds().join(', ') || '(none)');
+    console.log('\n=== CONFIGURE USERS (Persistent) ===');
+    const userIds = this.authManager.getUserIds();
+    console.log('Current users:', userIds.join(', ') || '(none)');
+    console.log('\n1. Add User');
+    console.log('2. Remove User');
+    console.log('3. Back to Main Menu');
 
-    const userId = await this.prompt('User ID (e.g., alice): ');
-    if (!userId) return;
+    const choice = await this.prompt('\nSelect option: ');
 
-    const email = await this.prompt('Email: ');
-    const password = await this.prompt('Password: ');
+    if (choice === '1') {
+      const userId = await this.prompt('User ID (e.g., alice): ');
+      if (!userId) return;
 
-    this.authManager.addUser(userId, { email, password });
-    console.log(`✓ User ${userId} configured`);
+      const email = await this.prompt('Email: ');
+      const password = await this.prompt('Password: ');
+
+      this.authManager.addUser(userId, { email, password });
+    } else if (choice === '2') {
+      if (userIds.length === 0) {
+        console.log('❌ No users to remove');
+        return;
+      }
+
+      const userId = await this.prompt('User ID to remove: ');
+      if (!userId) return;
+
+      try {
+        this.authManager.removeUser(userId);
+      } catch (err) {
+        console.log(`❌ ${err.message}`);
+      }
+    }
   }
 
   async recordSequence() {

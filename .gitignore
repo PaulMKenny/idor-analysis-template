@@ -14,6 +14,7 @@ node_modules/
 
 # Playwright session data
 scripts/auth-sessions/
+!scripts/auth-sessions/.gitkeep
 scripts/saved-sequences/
 scripts/.recording-config.json
 scripts/.replay-config.json
