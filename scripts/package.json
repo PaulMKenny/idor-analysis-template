@@ -10,7 +10,11 @@
     "test:examples": "playwright test playwright-examples.js --headed",
     "test:record": "playwright test --grep 'record-mode' --headed",
     "test:replay": "playwright test --grep 'replay-mode' --headed",
-    "test:demo": "playwright test --grep 'demo' --headed"
+    "test:demo": "playwright test --grep 'demo' --headed",
+    "test:mitm": "playwright test playwright-mitm-example.js --headed",
+    "test:mitm:alice": "playwright test playwright-mitm-example.js --headed --grep 'alice'",
+    "test:mitm:bob": "playwright test playwright-mitm-example.js --headed --grep 'bob'",
+    "test:mitm:multi": "playwright test playwright-mitm-example.js --headed --grep 'multi-user'"
   },
   "keywords": [
     "playwright",
