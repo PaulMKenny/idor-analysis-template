@@ -2,10 +2,10 @@
  * Playwright Session Manager - Test Suite
  *
  * These tests work with the InteractiveCLI to enable recording and replay workflows.
- * Separated from the library file to follow proper Playwright test architecture.
+ * Uses PERSISTENT CONTEXTS to avoid Cloudflare verification loops.
  */
 
-const { test } = require('@playwright/test');
+const { test, chromium } = require('@playwright/test');
 const fs = require('fs');
 const path = require('path');
 const {
@@ -17,7 +17,7 @@ const {
 
 test.describe('Recording and Replay', () => {
 
-  test('record-mode @manual', async ({ page }) => {
+  test('record-mode @manual', async () => {
     // Check for recording config
     if (!fs.existsSync('.recording-config.json')) {
       console.log('❌ No recording config found. Run interactive CLI first.');
@@ -32,10 +32,14 @@ test.describe('Recording and Replay', () => {
     const now = createSessionClock();
     const authManager = new AuthManager();
     const sequenceManager = new SequenceManager();
+
+    // ✓ IMPORTANT: Use persistent context to avoid Cloudflare loops
+    const context = await authManager.launchUserContext(chromium, config.userId);
+    const page = context.pages()[0] || await context.newPage();
+
     const logger = createActionAwareRequestLogger(page, now);
 
-    // Load config from somewhere (you'll customize this)
-    // For now, just pause to let user perform actions
+    // Pause for user to perform actions
     await page.pause();
     console.log('\n✓ Recording stopped. Processing...');
 
@@ -48,10 +52,12 @@ test.describe('Recording and Replay', () => {
     sequenceManager.saveRecording(sequence.id, capture, config.userId);
 
     console.log(`\n✓ Sequence recorded: ${sequence.id}`);
+
+    await context.close();
     fs.unlinkSync('.recording-config.json');
   });
 
-  test('replay-mode @manual', async ({ page }) => {
+  test('replay-mode @manual', async () => {
     if (!fs.existsSync('.replay-config.json')) {
       console.log('❌ No replay config found. Run interactive CLI first.');
       return;
@@ -65,10 +71,12 @@ test.describe('Recording and Replay', () => {
     const now = createSessionClock();
     const authManager = new AuthManager();
     const sequenceManager = new SequenceManager();
-    const logger = createActionAwareRequestLogger(page, now);
 
-    // Load user session
-    await authManager.loadSession(page, config.userId);
+    // ✓ IMPORTANT: Use persistent context to avoid Cloudflare loops
+    const context = await authManager.launchUserContext(chromium, config.userId);
+    const page = context.pages()[0] || await context.newPage();
+
+    const logger = createActionAwareRequestLogger(page, now);
 
     // Replay sequence
     await sequenceManager.replay(page, config.sequenceId, async (page, actions) => {
@@ -86,10 +94,12 @@ test.describe('Recording and Replay', () => {
     sequenceManager.saveRecording(config.sequenceId, capture, config.userId);
 
     console.log('\n✓ Replay complete');
+
+    await context.close();
     fs.unlinkSync('.replay-config.json');
   });
 
-  test('example: full workflow @demo', async ({ page, browser }) => {
+  test('example: full workflow @demo', async () => {
     const now = createSessionClock();
     const authManager = new AuthManager();
     const sequenceManager = new SequenceManager();
@@ -98,18 +108,20 @@ test.describe('Recording and Replay', () => {
     authManager.addUser('alice', { email: 'alice@example.com', password: 'pass1' });
     authManager.addUser('bob', { email: 'bob@example.com', password: 'pass2' });
 
-    // Record Alice's sequence
-    const aliceLogger = createActionAwareRequestLogger(page, now);
+    // ✓ Record Alice's sequence with persistent context
+    const aliceContext = await authManager.launchUserContext(chromium, 'alice');
+    const alicePage = aliceContext.pages()[0] || await aliceContext.newPage();
+    const aliceLogger = createActionAwareRequestLogger(alicePage, now);
 
     aliceLogger.startAction('goto wikipedia');
-    await page.goto('https://www.wikipedia.org/');
+    await alicePage.goto('https://www.wikipedia.org/');
 
     aliceLogger.startAction('fill search');
-    await page.getByRole('searchbox', { name: 'Search Wikipedia' }).fill('playwright');
+    await alicePage.getByRole('searchbox', { name: 'Search Wikipedia' }).fill('playwright');
 
     aliceLogger.startAction('click search');
-    await page.getByRole('button', { name: 'Search' }).click();
-    await page.waitForURL('**/wiki/**');
+    await alicePage.getByRole('button', { name: 'Search' }).click();
+    await alicePage.waitForURL('**/wiki/**');
 
     const aliceCapture = aliceLogger.stop();
 
@@ -122,10 +134,11 @@ test.describe('Recording and Replay', () => {
     sequenceManager.saveRecording(sequence.id, aliceCapture, 'alice');
 
     console.log(`\n✓ Sequence created: ${sequence.id}`);
+    await aliceContext.close();
 
-    // Now replay with Bob (new context)
-    const bobContext = await browser.newContext();
-    const bobPage = await bobContext.newPage();
+    // ✓ Replay with Bob using persistent context
+    const bobContext = await authManager.launchUserContext(chromium, 'bob');
+    const bobPage = bobContext.pages()[0] || await bobContext.newPage();
     const bobLogger = createActionAwareRequestLogger(bobPage, now);
 
     console.log('\n=== REPLAYING AS BOB ===');
