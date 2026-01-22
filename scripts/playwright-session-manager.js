@@ -569,13 +569,26 @@ class InteractiveCLI {
       this.authManager.saveUsers();
       console.log('✓ Browser profile mode set to: managed');
     } else if (modeChoice === '2') {
-      const profilePath = await this.prompt(
-        'Enter path to trusted Chromium profile\n' +
-        `(e.g., /home/${process.env.USER}/.cf-trusted-profile-${userId}): `
-      );
+      // Auto-generate default path based on user ID
+      const defaultPath = `/home/${process.env.USER}/.cf-trusted-profile-${userId}`;
 
-      if (!profilePath) {
-        console.log('❌ Path required for trusted mode');
+      console.log(`\nDefault trusted profile path: ${defaultPath}`);
+      console.log('1. Use default path');
+      console.log('2. Enter custom path');
+
+      const pathChoice = await this.prompt('\nChoice: ');
+
+      let profilePath;
+      if (pathChoice === '1' || !pathChoice) {
+        profilePath = defaultPath;
+      } else if (pathChoice === '2') {
+        profilePath = await this.prompt('Enter custom path: ');
+        if (!profilePath) {
+          console.log('❌ Path required for trusted mode');
+          return;
+        }
+      } else {
+        console.log('❌ Invalid choice');
         return;
       }
 
