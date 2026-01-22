@@ -663,8 +663,10 @@ def analyze_playwright_recording_for_idor():
             user = data.get("user", "unknown")
             timestamp = data.get("timestamp", "unknown")
             num_actions = len(data.get("buckets", []))
+            validation = data.get("validation", {})
+            total_requests = validation.get("totalRequests", "?")
             print(f"[{i}] {rec.name}")
-            print(f"    User: {user}, Actions: {num_actions}, Time: {timestamp}")
+            print(f"    User: {user}, Actions: {num_actions}, Requests: {total_requests}")
         except Exception:
             print(f"[{i}] {rec.name} (error reading)")
 
@@ -675,10 +677,18 @@ def analyze_playwright_recording_for_idor():
         print("ERROR: Invalid selection.\n")
         return
 
-    # Load recording
+    # Load recording using new JSON parser
+    print(f"\n[*] Loading recording: {selected_rec.name}")
+
     try:
-        rec_data = json.loads(selected_rec.read_text())
-        buckets = rec_data.get("buckets", [])
+        # Use the Playwright JSON parser
+        import sys
+        sys.path.insert(0, str(SRC_DIR))
+        from playwright_json_parser import PlaywrightRecording
+
+        recording = PlaywrightRecording(str(selected_rec))
+        buckets = recording.buckets
+
     except Exception as e:
         print(f"ERROR: Failed to load recording: {e}\n")
         return
@@ -703,14 +713,13 @@ def analyze_playwright_recording_for_idor():
     choice = input("\nChoice: ").strip().lower()
 
     if choice == "a":
-        selected_buckets = buckets
+        selected_action_indices = list(range(len(buckets)))
     elif choice == "s":
         indices_str = input("Enter action numbers (comma-separated): ").strip()
         try:
-            indices = [int(x.strip()) - 1 for x in indices_str.split(",")]
-            selected_buckets = [buckets[i] for i in indices if 0 <= i < len(buckets)]
-            if not selected_buckets:
-                print("ERROR: No valid actions selected.\n")
+            selected_action_indices = [int(x.strip()) - 1 for x in indices_str.split(",")]
+            if not selected_action_indices or any(i < 0 or i >= len(buckets) for i in selected_action_indices):
+                print("ERROR: Invalid action numbers.\n")
                 return
         except (ValueError, IndexError):
             print("ERROR: Invalid action numbers.\n")
@@ -719,31 +728,33 @@ def analyze_playwright_recording_for_idor():
         print("ERROR: Invalid choice.\n")
         return
 
-    # Convert to XML format for analyzer
-    print(f"\n[*] Converting {len(selected_buckets)} action(s) to analyzer format...")
-
     # Create output directory
-    session_name = f"playwright_{rec_data.get('user', 'unknown')}_{int(__import__('time').time())}"
+    session_name = f"playwright_{recording.user}_{int(__import__('time').time())}"
     session_dir = SESSIONS_DIR / session_name
     input_dir = session_dir / "input"
     output_dir = session_dir / "output"
     input_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    history_xml = input_dir / "history.xml"
+    # Save filtered recording as JSON (lossless)
+    filtered_recording_json = input_dir / "recording.json"
+    filtered_data = {
+        "user": recording.user,
+        "sequenceId": recording.sequence_id,
+        "timestamp": recording.timestamp,
+        "buckets": [buckets[i] for i in selected_action_indices],
+        "validation": recording.validation
+    }
 
-    # Generate Burp-compatible XML
-    convert_playwright_to_burp_xml(selected_buckets, history_xml)
+    with open(filtered_recording_json, "w", encoding="utf-8") as f:
+        json.dump(filtered_data, f, indent=2)
 
-    print(f"[+] Converted to: {history_xml}")
-    print(f"\n[*] Running IDOR analyzer...")
+    print(f"\n[*] Saved filtered recording: {filtered_recording_json}")
+    print(f"[*] Running IDOR analyzer on {len(selected_action_indices)} action(s)...")
 
-    # Run analyzer (no sitemap needed for basic analysis)
-    sitemap_xml = input_dir / "sitemap.xml"
-    sitemap_xml.write_text('<?xml version="1.0"?>\n<items></items>')
-
+    # Run analyzer with JSON input (new path)
     process = subprocess.Popen(
-        ["python3", "-u", str(SRC_DIR / "idor_analyzer.py"), str(history_xml), str(sitemap_xml)],
+        ["python3", "-u", str(SRC_DIR / "idor_analyzer_json.py"), str(filtered_recording_json)],
         cwd=str(output_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -761,95 +772,17 @@ def analyze_playwright_recording_for_idor():
 
     full_report = output_dir / "idor_playwright_analysis.txt"
     with open(full_report, "w", encoding="utf-8") as out:
-        out.write("=== IDOR ANALYZER OUTPUT (Playwright Recording) ===\n\n")
+        out.write("=== IDOR ANALYZER OUTPUT (Playwright Recording - JSON Direct) ===\n\n")
         out.write(f"Recording: {selected_rec.name}\n")
-        out.write(f"User: {rec_data.get('user', 'unknown')}\n")
-        out.write(f"Actions analyzed: {len(selected_buckets)}\n\n")
+        out.write(f"User: {recording.user}\n")
+        out.write(f"Actions analyzed: {len(selected_action_indices)}\n")
+        out.write(f"Total requests: {sum(len(buckets[i].get('requests', [])) for i in selected_action_indices)}\n\n")
         out.write("".join(stdout_lines))
         if stderr_text:
             out.write("\n=== STDERR ===\n")
             out.write(stderr_text)
 
     print(f"\n[+] Analysis complete: {full_report}\n")
-
-
-def convert_playwright_to_burp_xml(buckets, output_path):
-    """Convert Playwright recording buckets to Burp XML format"""
-    import html
-
-    xml_lines = ['<?xml version="1.0"?>', '<items burpVersion="2023.1">']
-
-    msg_id = 1
-    for bucket in buckets:
-        action = bucket.get("action", "")
-        requests = bucket.get("requests", [])
-
-        for req in requests:
-            method = req.get("method", "GET")
-            url = req.get("url", "")
-            status = req.get("status", 0)
-            headers = req.get("headers", {})
-            post_data = req.get("postData", "")
-            response_headers = req.get("responseHeaders", {})
-            response_body = req.get("responseBody", "")
-
-            # Parse URL
-            from urllib.parse import urlparse
-            parsed = urlparse(url)
-            host = parsed.netloc
-            path = parsed.path or "/"
-            if parsed.query:
-                path += "?" + parsed.query
-
-            # Build request
-            request_line = f"{method} {path} HTTP/1.1"
-            request_headers_str = f"Host: {host}\n"
-            for k, v in headers.items():
-                if k.lower() != "host":
-                    request_headers_str += f"{k}: {v}\n"
-
-            request_str = request_line + "\n" + request_headers_str
-            if post_data:
-                request_str += "\n" + post_data
-
-            # Build response
-            response_line = f"HTTP/1.1 {status} OK"
-            response_headers_str = ""
-            for k, v in response_headers.items():
-                response_headers_str += f"{k}: {v}\n"
-
-            response_str = response_line + "\n" + response_headers_str
-            if response_body and response_body != '<binary or failed to read>':
-                response_str += "\n" + response_body
-
-            # Encode to base64
-            import base64
-            request_b64 = base64.b64encode(request_str.encode('utf-8', errors='ignore')).decode('ascii')
-            response_b64 = base64.b64encode(response_str.encode('utf-8', errors='ignore')).decode('ascii')
-
-            # Add item
-            xml_lines.append(f'  <item>')
-            xml_lines.append(f'    <time>{int(__import__("time").time())}</time>')
-            xml_lines.append(f'    <url>{html.escape(url)}</url>')
-            xml_lines.append(f'    <host ip="">{html.escape(host)}</host>')
-            xml_lines.append(f'    <port>{parsed.port or (443 if parsed.scheme == "https" else 80)}</port>')
-            xml_lines.append(f'    <protocol>{parsed.scheme}</protocol>')
-            xml_lines.append(f'    <method>{html.escape(method)}</method>')
-            xml_lines.append(f'    <path>{html.escape(path)}</path>')
-            xml_lines.append(f'    <extension></extension>')
-            xml_lines.append(f'    <request base64="true">{request_b64}</request>')
-            xml_lines.append(f'    <status>{status}</status>')
-            xml_lines.append(f'    <responselength>{len(response_body)}</responselength>')
-            xml_lines.append(f'    <mimetype>text/html</mimetype>')
-            xml_lines.append(f'    <response base64="true">{response_b64}</response>')
-            xml_lines.append(f'    <comment>Action: {html.escape(action)}</comment>')
-            xml_lines.append(f'  </item>')
-
-            msg_id += 1
-
-    xml_lines.append('</items>')
-
-    output_path.write_text('\n'.join(xml_lines), encoding='utf-8')
 
 
 # ==========================================================

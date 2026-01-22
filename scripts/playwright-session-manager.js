@@ -354,14 +354,53 @@ class SequenceManager {
 
   // Save full recording with all details
   saveRecording(sequenceId, buckets, user) {
+    // CRITICAL VALIDATION: Fail loudly if recording is empty
+    const totalRequests = buckets.reduce((sum, b) => sum + (b.requests?.length || 0), 0);
+
+    if (buckets.length === 0) {
+      throw new Error(
+        'RECORDING VALIDATION FAILED:\n' +
+        '  ✗ Zero action buckets captured\n' +
+        '  ✗ Recording is completely empty\n' +
+        '  → Possible causes:\n' +
+        '    - Browser was blocked by Cloudflare\n' +
+        '    - Network connectivity issues\n' +
+        '    - No actions were performed\n' +
+        '  → Solution: Check browser window for challenges/errors'
+      );
+    }
+
+    if (totalRequests === 0) {
+      throw new Error(
+        'RECORDING VALIDATION FAILED:\n' +
+        `  ✗ ${buckets.length} action(s) captured but ZERO HTTP requests\n` +
+        '  ✗ Recording contains no network traffic\n' +
+        '  → Possible causes:\n' +
+        '    - Browser blocked by Cloudflare or network filter\n' +
+        '    - Actions did not trigger any HTTP requests\n' +
+        '    - Page navigation failed silently\n' +
+        '  → Solution:\n' +
+        '    - Check browser window during recording\n' +
+        '    - For Cloudflare sites: use trusted profile mode\n' +
+        '    - Verify actions actually load new content'
+      );
+    }
+
     const recordingFile = path.join(this.recordingsDir, `${sequenceId}-${user}-${Date.now()}.json`);
     fs.writeFileSync(recordingFile, JSON.stringify({
       sequenceId,
       user,
       timestamp: new Date().toISOString(),
-      buckets
+      buckets,
+      validation: {
+        totalActions: buckets.length,
+        totalRequests: totalRequests,
+        validated: true
+      }
     }, null, 2));
+
     console.log(`✓ Full recording saved: ${recordingFile}`);
+    console.log(`  Actions: ${buckets.length}, Requests: ${totalRequests}`);
     return recordingFile;
   }
 
@@ -380,6 +419,151 @@ class SequenceManager {
         actions: data.buckets.length
       };
     });
+  }
+
+  // Generate Playwright test from recording
+  generateTestFromRecording(recordingFile, options = {}) {
+    const recording = JSON.parse(fs.readFileSync(recordingFile, 'utf8'));
+    const { sequenceId, user, buckets } = recording;
+
+    const testName = options.testName || `replay-${sequenceId}-${user}`;
+    const testDescription = options.description || `Auto-generated from recording: ${path.basename(recordingFile)}`;
+
+    const testCode = this._generateTestCode(testName, testDescription, buckets, user, options);
+
+    const testFile = path.join(this.baseDir, `${testName}.spec.js`);
+    fs.writeFileSync(testFile, testCode);
+
+    console.log(`✓ Generated test: ${testFile}`);
+    return testFile;
+  }
+
+  _generateTestCode(testName, description, buckets, originalUser, options = {}) {
+    const multiUser = options.multiUser || false;
+    const users = options.users || [originalUser];
+
+    const imports = `const { test, expect } = require('@playwright/test');
+const { AuthManager, createSessionClock, createActionAwareRequestLogger } = require('./playwright-session-manager');
+
+/**
+ * ${description}
+ * Original user: ${originalUser}
+ * Actions: ${buckets.length}
+ * Generated: ${new Date().toISOString()}
+ */
+`;
+
+    if (multiUser) {
+      return this._generateMultiUserTest(testName, buckets, users, imports);
+    } else {
+      return this._generateSingleUserTest(testName, buckets, originalUser, imports);
+    }
+  }
+
+  _generateSingleUserTest(testName, buckets, user, imports) {
+    const actions = buckets.map((bucket, idx) => {
+      const action = bucket.action;
+      const requests = bucket.requests || [];
+      const mainRequest = requests[0];
+
+      if (!mainRequest) {
+        return `  // Action ${idx + 1}: ${action}\n  // (no HTTP requests recorded)`;
+      }
+
+      const url = mainRequest.url;
+      const method = mainRequest.method;
+
+      return `  // Action ${idx + 1}: ${action}
+  logger.startAction('${action}');
+  await page.goto('${url}');
+  await page.waitForLoadState('networkidle');`;
+    }).join('\n\n');
+
+    return `${imports}
+
+test('${testName}', async ({ browser }) => {
+  const authManager = new AuthManager();
+  const { chromium } = require('playwright');
+
+  // Launch user context
+  const context = await authManager.launchUserContext(chromium, '${user}');
+  const page = context.pages()[0] || await context.newPage();
+
+  const now = createSessionClock();
+  const logger = createActionAwareRequestLogger(page, now);
+
+  try {
+${actions}
+
+    const capture = logger.stop();
+    console.log(\`✓ Replay complete: \${capture.length} actions\`);
+
+  } finally {
+    await context.close();
+  }
+});
+`;
+  }
+
+  _generateMultiUserTest(testName, buckets, users, imports) {
+    const baseActions = buckets.map((bucket, idx) => {
+      const action = bucket.action;
+      const requests = bucket.requests || [];
+      const mainRequest = requests[0];
+
+      if (!mainRequest) {
+        return `    // Action ${idx + 1}: ${action}\n    // (no HTTP requests recorded)`;
+      }
+
+      const url = mainRequest.url;
+      return `    // Action ${idx + 1}: ${action}
+    logger.startAction('[USER-\${user}] ${action}');
+    await page.goto('${url}');
+    await page.waitForLoadState('networkidle');`;
+    }).join('\n\n');
+
+    const userTests = users.map(user => `
+  // Test with user: ${user}
+  console.log('\\n=== Testing with user: ${user} ===');
+  const context_${user} = await authManager.launchUserContext(chromium, '${user}');
+  const page_${user} = context_${user}.pages()[0] || await context_${user}.newPage();
+  const logger_${user} = createActionAwareRequestLogger(page_${user}, now);
+
+  try {
+    const user = '${user}';
+    const page = page_${user};
+    const logger = logger_${user};
+
+${baseActions}
+
+    const capture = logger.stop();
+    recordings.push({ user: '${user}', capture });
+    console.log(\`✓ User ${user}: \${capture.length} actions captured\`);
+
+  } finally {
+    await context_${user}.close();
+  }
+`).join('\n');
+
+    return `${imports}
+
+test('${testName} - multi-user IDOR test', async () => {
+  const authManager = new AuthManager();
+  const { chromium } = require('playwright');
+  const now = createSessionClock();
+  const recordings = [];
+
+${userTests}
+
+  // Compare recordings for IDOR issues
+  console.log('\\n=== IDOR Analysis ===');
+  console.log(\`Recorded \${recordings.length} user sessions\`);
+
+  // TODO: Add automated IDOR comparison logic here
+  // Compare recordings[0].capture with recordings[1].capture
+  // Look for unauthorized access patterns
+});
+`;
   }
 
   // Replay a sequence with a specific user
@@ -458,7 +642,8 @@ class InteractiveCLI {
       console.log('6. Delete Sequence');
       console.log('7. Compare Recordings');
       console.log('8. Bootstrap Trusted Profile');
-      console.log('9. Exit');
+      console.log('9. Generate Test from Recording');
+      console.log('0. Exit');
       console.log('========================================');
 
       const choice = await this.prompt('Select option: ');
@@ -490,6 +675,9 @@ class InteractiveCLI {
           await this.bootstrapTrustedProfile();
           break;
         case '9':
+          await this.generateTestFromRecording();
+          break;
+        case '0':
           console.log('Goodbye!');
           this.rl.close();
           return;
@@ -815,6 +1003,83 @@ class InteractiveCLI {
 
     console.log('\n✓ Bootstrap complete. Profile ready for automation.');
     console.log(`   User "${selected.userId}" can now use this trusted profile.`);
+  }
+
+  async generateTestFromRecording() {
+    console.log('\n=== GENERATE TEST FROM RECORDING ===');
+
+    const recordings = fs.readdirSync(this.sequenceManager.recordingsDir)
+      .filter(f => f.endsWith('.json'))
+      .map(f => path.join(this.sequenceManager.recordingsDir, f));
+
+    if (recordings.length === 0) {
+      console.log('❌ No recordings found.\n');
+      return;
+    }
+
+    console.log('\nAvailable recordings:\n');
+    recordings.forEach((rec, idx) => {
+      try {
+        const data = JSON.parse(fs.readFileSync(rec, 'utf8'));
+        console.log(`[${idx + 1}] ${path.basename(rec)}`);
+        console.log(`    User: ${data.user}, Actions: ${data.buckets.length}, Time: ${data.timestamp}`);
+      } catch (e) {
+        console.log(`[${idx + 1}] ${path.basename(rec)} (error reading)`);
+      }
+    });
+
+    const choice = await this.prompt('\nSelect recording: ');
+    const idx = parseInt(choice) - 1;
+
+    if (idx < 0 || idx >= recordings.length) {
+      console.log('❌ Invalid selection\n');
+      return;
+    }
+
+    const selectedRecording = recordings[idx];
+    const recordingData = JSON.parse(fs.readFileSync(selectedRecording, 'utf8'));
+
+    console.log('\nTest type:');
+    console.log('1) Single user (replay as original user)');
+    console.log('2) Multi-user (replay with multiple users for IDOR testing)');
+
+    const typeChoice = await this.prompt('\nChoice: ');
+
+    if (typeChoice === '1') {
+      const testFile = this.sequenceManager.generateTestFromRecording(selectedRecording, {
+        testName: `replay-${recordingData.sequenceId}-${recordingData.user}`,
+        description: `Replay recording for user ${recordingData.user}`
+      });
+
+      console.log(`\n✓ Test generated: ${testFile}`);
+      console.log('\nRun with: npx playwright test\n');
+
+    } else if (typeChoice === '2') {
+      const userIds = this.authManager.getUserIds();
+      console.log(`\nAvailable users: ${userIds.join(', ')}`);
+
+      const usersInput = await this.prompt('Enter user IDs (comma-separated): ');
+      const users = usersInput.split(',').map(u => u.trim()).filter(u => u);
+
+      if (users.length < 2) {
+        console.log('❌ Multi-user tests require at least 2 users\n');
+        return;
+      }
+
+      const testFile = this.sequenceManager.generateTestFromRecording(selectedRecording, {
+        testName: `multi-user-idor-${recordingData.sequenceId}`,
+        description: `Multi-user IDOR test for ${recordingData.sequenceId}`,
+        multiUser: true,
+        users: users
+      });
+
+      console.log(`\n✓ Multi-user test generated: ${testFile}`);
+      console.log(`  Users: ${users.join(', ')}`);
+      console.log('\nRun with: npx playwright test\n');
+
+    } else {
+      console.log('❌ Invalid choice\n');
+    }
   }
 }
 
