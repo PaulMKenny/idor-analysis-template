@@ -95,6 +95,49 @@ Result: Challenge issued **once**, then cached.
 
 ## Implementation
 
+### Browser Profile Modes
+
+AuthManager supports **two profile modes**:
+
+#### 1. Managed Mode (Default)
+Playwright creates and manages the profile automatically. Good for most use cases.
+
+```javascript
+// User configured with managed mode (default)
+{
+  "alice": {
+    "email": "alice@example.com",
+    "password": "secret123",
+    "browserProfile": {
+      "mode": "managed"
+    }
+  }
+}
+```
+
+#### 2. Trusted Mode (For Strict Cloudflare)
+Use a manually-bootstrapped Chromium profile that you've already logged into. **This is the solution for sites with strict Cloudflare protection** (like GitLab).
+
+```javascript
+// User configured with trusted mode
+{
+  "bob": {
+    "email": "bob@example.com",
+    "password": "secret456",
+    "browserProfile": {
+      "mode": "trusted",
+      "path": "/home/user/.cf-trusted-profile-bob"
+    }
+  }
+}
+```
+
+**Why trusted mode works:**
+- Cloudflare trusts **browser history**, not just cookies
+- A Playwright-created profile is "fresh" → Cloudflare is suspicious
+- A manually-used profile has **real browsing history** → Cloudflare trusts it
+- You bootstrap trust **once manually**, then Playwright reuses it
+
 ### Using AuthManager (Recommended)
 
 ```javascript
@@ -103,13 +146,10 @@ const { AuthManager } = require('./playwright-session-manager');
 
 const authManager = new AuthManager();
 
-// Configure user (persistent across runs)
-authManager.addUser('alice', {
-  email: 'alice@example.com',
-  password: 'secret123'
-});
+// Configure user (done via CLI or manually)
+// See "CLI Setup" section below
 
-// Launch persistent context
+// Launch persistent context (mode determined by user config)
 const context = await authManager.launchUserContext(chromium, 'alice');
 const page = context.pages()[0] || await context.newPage();
 
@@ -118,6 +158,41 @@ await page.goto('https://gitlab.com/explore');
 // Cloudflare challenge happens ONCE, then remembered forever
 
 await context.close();
+```
+
+### CLI Setup (Recommended for Trusted Mode)
+
+For sites with strict Cloudflare (GitLab, etc.), use the CLI to configure trusted profiles:
+
+```bash
+cd scripts
+npm run cli
+```
+
+**Step 1: Configure user with trusted mode**
+```
+Main Menu → Configure Users → Configure Browser Profile Mode
+→ Select user: bob
+→ Mode: Trusted
+→ Path: /home/user/.cf-trusted-profile-bob
+```
+
+**Step 2: Bootstrap the trusted profile**
+```
+Main Menu → Bootstrap Trusted Profile
+→ Select user: bob
+→ [Chromium launches]
+→ Manually solve Cloudflare challenge
+→ Log into GitLab
+→ Browse a few pages
+→ Close browser
+```
+
+**Step 3: Use in your tests**
+```javascript
+// Now this will use the trusted profile automatically
+const context = await authManager.launchUserContext(chromium, 'bob');
+// No Cloudflare loop!
 ```
 
 ### Manual Approach
@@ -160,6 +235,36 @@ npm run demo:persistent:compare
 ```
 
 Prints technical comparison table.
+
+## When to Use Each Mode
+
+### Managed Mode (Default)
+**Use for:**
+- Sites with light/moderate Cloudflare protection
+- Internal applications
+- First-time setup (can upgrade to trusted if needed)
+- Most testing scenarios
+
+**Characteristics:**
+- Playwright creates profile automatically
+- Zero manual setup
+- Still preserves cookies/state across runs
+- Usually sufficient for most sites
+
+### Trusted Mode
+**Use for:**
+- Sites with **strict** Cloudflare protection (GitLab, etc.)
+- When you experience verification loops with managed mode
+- Bug bounty targets with aggressive bot detection
+- Production SaaS applications
+
+**Characteristics:**
+- Requires one-time manual bootstrap
+- Uses real browser profile with history
+- Highest Cloudflare trust level
+- Indistinguishable from normal browser
+
+**Rule of thumb:** Start with managed mode. If you get verification loops, upgrade to trusted mode.
 
 ## When to Use Persistent Contexts
 
@@ -211,13 +316,14 @@ This enables:
 
 | Fix | Stability | Correctness | Maintenance | Verdict |
 |-----|-----------|-------------|-------------|---------|
-| **Persistent contexts** | ★★★★★ | ✓ Correct | Low | **Use this** |
+| **Trusted profile mode** | ★★★★★ | ✓ Correct | Low (one-time) | **Best for strict Cloudflare** |
+| **Managed profile mode** | ★★★★☆ | ✓ Correct | Zero | **Good for most sites** |
 | Disable proxy temporarily | ★★★☆☆ | Partial | Medium | Mitigation only |
 | Use "real browser" manually | ★★★★☆ | External | High | Doesn't scale |
 | Stealth/fingerprint hardening | ★★☆☆☆ | ❌ Arms race | Very High | Breaks unpredictably |
 | Change network/IP | ★★☆☆☆ | Partial | Low control | Insufficient alone |
 
-Only persistent contexts are **architecturally sound**.
+Only persistent contexts (managed or trusted) are **architecturally sound**.
 
 ## Troubleshooting
 
@@ -243,11 +349,49 @@ Only persistent contexts are **architecturally sound**.
 
 ### Profile Corruption?
 
-Delete and recreate:
+**For managed mode:**
 ```bash
 rm -rf scripts/auth-sessions/browser-profiles/alice
 npm run demo:persistent  # Recreates profile
 ```
+
+**For trusted mode:**
+```bash
+# Delete and re-bootstrap
+rm -rf /home/user/.cf-trusted-profile-bob
+npm run cli
+# → Bootstrap Trusted Profile → bob
+# → Manually solve Cloudflare and login again
+```
+
+### Trusted Mode Not Working?
+
+1. **Verify profile was bootstrapped:**
+   ```bash
+   ls -la /home/user/.cf-trusted-profile-bob/
+   # Should contain: Cookies, Local Storage, History, etc.
+   ```
+
+2. **Check you're using the SAME Chromium:**
+   - Bootstrap: `chromium-browser --user-data-dir=...`
+   - Playwright: Uses same `chromium-browser` executable
+   - Mismatch = different fingerprint = Cloudflare triggers again
+
+3. **Ensure you actually logged in during bootstrap:**
+   - Don't just solve Cloudflare challenge
+   - Actually log into the target site
+   - Browse a few pages
+   - Close browser normally (don't kill process)
+
+4. **Verify user config:**
+   ```bash
+   cat scripts/auth-sessions/users.json
+   # Should show:
+   # "browserProfile": {
+   #   "mode": "trusted",
+   #   "path": "/home/user/.cf-trusted-profile-bob"
+   # }
+   ```
 
 ## Best Practices
 

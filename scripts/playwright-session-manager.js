@@ -145,7 +145,9 @@ class AuthManager {
 
   /**
    * Launch a persistent browser context for a user.
-   * Recommended for all Cloudflare-protected targets.
+   * Supports two modes:
+   * - managed: Playwright creates and manages the profile (default)
+   * - trusted: Use a pre-bootstrapped Chromium profile (for Cloudflare)
    *
    * Example:
    *   const context = await authManager.launchUserContext(chromium, 'alice');
@@ -156,12 +158,51 @@ class AuthManager {
       throw new Error(`User ${userId} not configured`);
     }
 
+    const user = this.users.get(userId);
+    const profileConfig = user.browserProfile || { mode: 'managed' };
+
+    // TRUSTED MODE: Use pre-bootstrapped browser profile
+    if (profileConfig.mode === 'trusted') {
+      const profilePath = profileConfig.path;
+
+      // Fail fast if trusted profile doesn't exist
+      if (!fs.existsSync(profilePath)) {
+        throw new Error(
+          `Trusted profile not found: ${profilePath}\n` +
+          `Run: npm run cli → Bootstrap Trusted Profile → ${userId}`
+        );
+      }
+
+      console.log(`🔐 Launching TRUSTED context for ${userId}`);
+      console.log(`   Profile: ${profilePath}`);
+
+      const context = await browserType.launchPersistentContext(profilePath, {
+        headless: false,
+        executablePath: '/usr/bin/chromium-browser',
+        args: [
+          '--disable-dev-shm-usage',
+          '--no-sandbox',
+          '--disable-blink-features=AutomationControlled',
+          '--disable-features=IsolateOrigins,site-per-process'
+        ],
+        ...options
+      });
+
+      return context;
+    }
+
+    // MANAGED MODE: Playwright-owned profile (default)
     const profilePath = this.getProfilePath(userId);
-    console.log(`🔐 Launching persistent context for ${userId}`);
+    console.log(`🔐 Launching MANAGED context for ${userId}`);
     console.log(`   Profile: ${profilePath}`);
 
     const context = await browserType.launchPersistentContext(profilePath, {
       headless: false,
+      executablePath: '/usr/bin/chromium-browser',
+      args: [
+        '--disable-dev-shm-usage',
+        '--no-sandbox'
+      ],
       ...options
     });
 
@@ -416,7 +457,8 @@ class InteractiveCLI {
       console.log('5. Edit Sequence (Codium)');
       console.log('6. Delete Sequence');
       console.log('7. Compare Recordings');
-      console.log('8. Exit');
+      console.log('8. Bootstrap Trusted Profile');
+      console.log('9. Exit');
       console.log('========================================');
 
       const choice = await this.prompt('Select option: ');
@@ -445,6 +487,9 @@ class InteractiveCLI {
           await this.compareRecordings();
           break;
         case '8':
+          await this.bootstrapTrustedProfile();
+          break;
+        case '9':
           console.log('Goodbye!');
           this.rl.close();
           return;
@@ -460,7 +505,8 @@ class InteractiveCLI {
     console.log('Current users:', userIds.join(', ') || '(none)');
     console.log('\n1. Add User');
     console.log('2. Remove User');
-    console.log('3. Back to Main Menu');
+    console.log('3. Configure Browser Profile Mode');
+    console.log('4. Back to Main Menu');
 
     const choice = await this.prompt('\nSelect option: ');
 
@@ -486,6 +532,64 @@ class InteractiveCLI {
       } catch (err) {
         console.log(`❌ ${err.message}`);
       }
+    } else if (choice === '3') {
+      await this.configureBrowserProfile();
+    }
+  }
+
+  async configureBrowserProfile() {
+    console.log('\n=== CONFIGURE BROWSER PROFILE MODE ===');
+    const userIds = this.authManager.getUserIds();
+
+    if (userIds.length === 0) {
+      console.log('❌ No users configured. Add a user first.');
+      return;
+    }
+
+    console.log('Available users:', userIds.join(', '));
+    const userId = await this.prompt('\nUser ID to configure: ');
+
+    if (!this.authManager.users.has(userId)) {
+      console.log('❌ User not found');
+      return;
+    }
+
+    const user = this.authManager.users.get(userId);
+    const currentMode = user.browserProfile?.mode || 'managed';
+
+    console.log(`\nCurrent mode: ${currentMode}`);
+    console.log('\nSelect browser profile mode:');
+    console.log('1. Managed (Playwright-managed, automatic)');
+    console.log('2. Trusted (pre-configured Chromium profile for Cloudflare)');
+
+    const modeChoice = await this.prompt('\nChoice: ');
+
+    if (modeChoice === '1') {
+      user.browserProfile = { mode: 'managed' };
+      this.authManager.saveUsers();
+      console.log('✓ Browser profile mode set to: managed');
+    } else if (modeChoice === '2') {
+      const profilePath = await this.prompt(
+        'Enter path to trusted Chromium profile\n' +
+        `(e.g., /home/${process.env.USER}/.cf-trusted-profile-${userId}): `
+      );
+
+      if (!profilePath) {
+        console.log('❌ Path required for trusted mode');
+        return;
+      }
+
+      user.browserProfile = {
+        mode: 'trusted',
+        path: profilePath
+      };
+      this.authManager.saveUsers();
+      console.log('✓ Browser profile mode set to: trusted');
+      console.log(`   Path: ${profilePath}`);
+      console.log('\n⚠️  You must bootstrap this profile before use:');
+      console.log('   Main Menu → Bootstrap Trusted Profile');
+    } else {
+      console.log('❌ Invalid choice');
     }
   }
 
@@ -621,6 +725,83 @@ class InteractiveCLI {
 
     console.log('\n✓ Use external diff tool to compare files');
     console.log(`   Location: ${this.sequenceManager.recordingsDir}/`);
+  }
+
+  async bootstrapTrustedProfile() {
+    console.log('\n=== BOOTSTRAP TRUSTED PROFILE ===');
+    console.log('This will launch Chromium for manual setup of a trusted profile.');
+    console.log('Use this to solve Cloudflare challenges and establish browser trust.\n');
+
+    const userIds = this.authManager.getUserIds();
+    if (userIds.length === 0) {
+      console.log('❌ No users configured. Add a user first.');
+      return;
+    }
+
+    // Show users in trusted mode
+    const trustedUsers = [];
+    this.authManager.users.forEach((user, userId) => {
+      if (user.browserProfile?.mode === 'trusted') {
+        trustedUsers.push({ userId, path: user.browserProfile.path });
+      }
+    });
+
+    if (trustedUsers.length === 0) {
+      console.log('❌ No users configured with trusted profile mode.');
+      console.log('   Configure a user first: Main Menu → Configure Users → Configure Browser Profile Mode');
+      return;
+    }
+
+    console.log('Users in trusted mode:');
+    trustedUsers.forEach((u, idx) => {
+      console.log(`${idx + 1}. ${u.userId} → ${u.path}`);
+    });
+
+    const choice = await this.prompt('\nSelect user (number): ');
+    const selectedIdx = parseInt(choice) - 1;
+
+    if (selectedIdx < 0 || selectedIdx >= trustedUsers.length) {
+      console.log('❌ Invalid selection');
+      return;
+    }
+
+    const selected = trustedUsers[selectedIdx];
+
+    console.log(`\n✓ Launching Chromium with profile: ${selected.path}`);
+    console.log('\n=== INSTRUCTIONS ===');
+    console.log('1. Solve any Cloudflare challenges');
+    console.log('2. Log into your target site (GitLab, etc.)');
+    console.log('3. Browse a few pages to establish history');
+    console.log('4. Close the browser window when done');
+    console.log('====================\n');
+
+    await this.prompt('Press Enter to launch Chromium...');
+
+    // Create profile directory if it doesn't exist
+    if (!fs.existsSync(selected.path)) {
+      fs.mkdirSync(selected.path, { recursive: true });
+      console.log(`✓ Created profile directory: ${selected.path}`);
+    }
+
+    // Launch Chromium
+    const chromium = spawn('chromium-browser', [
+      `--user-data-dir=${selected.path}`,
+      '--no-sandbox',
+      '--disable-dev-shm-usage'
+    ], {
+      stdio: 'inherit',
+      shell: false
+    });
+
+    await new Promise((resolve) => {
+      chromium.on('close', (code) => {
+        console.log(`\n✓ Chromium closed (exit code: ${code})`);
+        resolve();
+      });
+    });
+
+    console.log('\n✓ Bootstrap complete. Profile ready for automation.');
+    console.log(`   User "${selected.userId}" can now use this trusted profile.`);
   }
 }
 
