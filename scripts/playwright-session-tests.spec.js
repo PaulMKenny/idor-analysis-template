@@ -35,13 +35,6 @@ test('record-mode @manual', async () => {
   const context = await authManager.launchUserContext(chromium, config.userId);
   const page = context.pages()[0] || await context.newPage();
 
-  // Verify profile is loaded
-  const cookies = await context.cookies();
-  console.log(`✓ Profile loaded: ${cookies.length} cookies found`);
-  if (cookies.length === 0) {
-    console.warn('⚠️  WARNING: No cookies in profile! Profile may not be properly loaded.');
-  }
-
   const logger = createActionAwareRequestLogger(page, now);
 
   // Auto-start first action to capture all HTTP traffic

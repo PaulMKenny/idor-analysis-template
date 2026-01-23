@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
+const os = require('os');
 
 /* ---------- session clock ---------- */
 function createSessionClock() {
@@ -77,6 +78,53 @@ class AuthManager {
 
     // Load persisted users
     this.loadUsers();
+  }
+
+  /**
+   * Check if a profile directory has cookies stored in its Cookies database.
+   * This directly checks the Chromium profile's Cookies SQLite file.
+   *
+   * Note: context.cookies() returns cookies from the browsing context (active pages),
+   * not from the profile database. This method checks the actual stored cookies.
+   *
+   * @param {string} profilePath - Path to the Chromium user data directory
+   * @returns {object} - {hasCookies: boolean, cookieDbSize: number, cookieDbPath: string}
+   */
+  checkProfileCookies(profilePath) {
+    // Chromium stores cookies in: <profile>/Default/Network/Cookies
+    const cookieDbPath = path.join(profilePath, 'Default', 'Network', 'Cookies');
+
+    // Fallback: older Chromium versions use: <profile>/Default/Cookies
+    const legacyCookieDbPath = path.join(profilePath, 'Default', 'Cookies');
+
+    let actualPath = null;
+    let stats = null;
+
+    if (fs.existsSync(cookieDbPath)) {
+      actualPath = cookieDbPath;
+      stats = fs.statSync(cookieDbPath);
+    } else if (fs.existsSync(legacyCookieDbPath)) {
+      actualPath = legacyCookieDbPath;
+      stats = fs.statSync(legacyCookieDbPath);
+    }
+
+    if (!actualPath || !stats) {
+      return {
+        hasCookies: false,
+        cookieDbSize: 0,
+        cookieDbPath: null
+      };
+    }
+
+    // SQLite database has a minimum size even when empty (~20KB)
+    // If it's larger, it likely contains cookies
+    const hasCookies = stats.size > 24576; // 24KB threshold
+
+    return {
+      hasCookies,
+      cookieDbSize: stats.size,
+      cookieDbPath: actualPath
+    };
   }
 
   loadUsers() {
@@ -175,6 +223,16 @@ class AuthManager {
 
       console.log(`🔐 Launching TRUSTED context for ${userId}`);
       console.log(`   Profile: ${profilePath}`);
+
+      // Check if profile has been bootstrapped with cookies
+      const cookieCheck = this.checkProfileCookies(profilePath);
+      if (cookieCheck.hasCookies) {
+        const sizeKB = (cookieCheck.cookieDbSize / 1024).toFixed(1);
+        console.log(`   ✓ Profile bootstrapped: Cookies database found (${sizeKB} KB)`);
+      } else {
+        console.warn(`   ⚠️  Profile may not be bootstrapped: No cookies found`);
+        console.warn(`   → Run: npm run cli → Bootstrap Trusted Profile → ${userId}`);
+      }
 
       const context = await browserType.launchPersistentContext(profilePath, {
         headless: false,
@@ -794,7 +852,7 @@ class InteractiveCLI {
       console.log('✓ Browser profile mode set to: managed');
     } else if (modeChoice === '2') {
       // Auto-generate default path based on user ID
-      const defaultPath = `/home/${process.env.USER}/.cf-trusted-profile-${userId}`;
+      const defaultPath = path.join(os.homedir(), `.cf-trusted-profile-${userId}`);
 
       console.log(`\nDefault trusted profile path: ${defaultPath}`);
       console.log('1. Use default path');
