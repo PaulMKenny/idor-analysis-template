@@ -37,6 +37,9 @@ test('record-mode @manual', async () => {
 
   const logger = createActionAwareRequestLogger(page, now);
 
+  // Start capturing actions before pausing
+  logger.startAction('manual-recording');
+
   // Pause for user to perform actions
   await page.pause();
   console.log('\n✓ Recording stopped. Processing...');
