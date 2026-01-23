@@ -183,9 +183,45 @@ class AuthManager {
           '--disable-dev-shm-usage',
           '--no-sandbox',
           '--disable-blink-features=AutomationControlled',
-          '--disable-features=IsolateOrigins,site-per-process'
+          '--disable-features=IsolateOrigins,site-per-process',
+          '--exclude-switches=enable-automation'
         ],
+        ignoreDefaultArgs: ['--enable-automation'],
         ...options
+      });
+
+      // Inject stealth scripts to hide automation signals
+      await context.addInitScript(() => {
+        // Override navigator.webdriver
+        Object.defineProperty(navigator, 'webdriver', {
+          get: () => undefined,
+          configurable: true
+        });
+
+        // Override Chrome runtime
+        if (window.chrome) {
+          delete window.chrome.runtime;
+        }
+
+        // Override permissions query
+        const originalQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (parameters) => (
+          parameters.name === 'notifications' ?
+            Promise.resolve({ state: Notification.permission }) :
+            originalQuery(parameters)
+        );
+
+        // Override plugin array
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => [1, 2, 3, 4, 5],
+          configurable: true
+        });
+
+        // Override languages
+        Object.defineProperty(navigator, 'languages', {
+          get: () => ['en-US', 'en'],
+          configurable: true
+        });
       });
 
       return context;
