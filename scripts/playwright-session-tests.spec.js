@@ -37,6 +37,16 @@ test('record-mode @manual', async () => {
 
   const logger = createActionAwareRequestLogger(page, now);
 
+  // Auto-start first action to capture all HTTP traffic
+  logger.startAction('Initial navigation');
+
+  console.log('\n=== INTERACTIVE RECORDING ===');
+  console.log('Instructions:');
+  console.log('1. Perform your workflow in the browser');
+  console.log('2. Press CTRL+C in the Inspector to mark action boundaries (optional)');
+  console.log('3. Close the Inspector when done');
+  console.log('================================\n');
+
   // Pause for user to perform actions
   await page.pause();
   console.log('\n✓ Recording stopped. Processing...');
