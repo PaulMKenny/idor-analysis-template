@@ -17,7 +17,10 @@
     "test:mitm:multi": "playwright test playwright-mitm-example.js --headed --grep 'multi-user'",
     "demo:persistent": "node playwright-persistent-example.js",
     "demo:persistent:wrong": "node playwright-persistent-example.js --wrong",
-    "demo:persistent:compare": "node playwright-persistent-example.js --compare"
+    "demo:persistent:compare": "node playwright-persistent-example.js --compare",
+    "setup:cloudflare": "node setup-cloudflare-workaround.js",
+    "verify:cloudflare": "node verify-cloudflare-setup.js",
+    "bootstrap:profile": "./bootstrap-profile.sh"
   },
   "keywords": [
     "playwright",
