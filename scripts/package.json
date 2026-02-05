@@ -1,0 +1,35 @@
+{
+  "name": "playwright-session-manager",
+  "version": "1.0.0",
+  "description": "User-agnostic session recording and replay for multi-user testing workflows",
+  "main": "playwright-session-manager.js",
+  "scripts": {
+    "cli": "node playwright-session-manager.js",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:examples": "playwright test playwright-examples.js --headed",
+    "test:record": "playwright test --grep 'record-mode' --headed",
+    "test:replay": "playwright test --grep 'replay-mode' --headed",
+    "test:demo": "playwright test --grep 'demo' --headed",
+    "test:mitm": "playwright test playwright-mitm-example.js --headed",
+    "test:mitm:alice": "playwright test playwright-mitm-example.js --headed --grep 'alice'",
+    "test:mitm:bob": "playwright test playwright-mitm-example.js --headed --grep 'bob'",
+    "test:mitm:multi": "playwright test playwright-mitm-example.js --headed --grep 'multi-user'",
+    "demo:persistent": "node playwright-persistent-example.js",
+    "demo:persistent:wrong": "node playwright-persistent-example.js --wrong",
+    "demo:persistent:compare": "node playwright-persistent-example.js --compare"
+  },
+  "keywords": [
+    "playwright",
+    "testing",
+    "idor",
+    "security",
+    "session-management",
+    "multi-user"
+  ],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@playwright/test": "^1.40.0"
+  }
+}
